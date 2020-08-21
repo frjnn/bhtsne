@@ -6,7 +6,7 @@ edition = "2018"
 description = "Vanilla and Barnes-Hut implementations of t-SNE."
 repository = "https://github.com/Gethseman/bhtsne"
 license = "MIT"
-keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "data", "machine-learning", "ml"]
+keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "machine-learning"]
 categories = ["algorithms", "science", "visualization"]
 readme = "README.md"
 
