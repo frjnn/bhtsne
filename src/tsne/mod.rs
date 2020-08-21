@@ -1,9 +1,3 @@
-//! # tsne
-//!
-//! `tsne` contains the implementations of the
-//! vanilla version of t-SNE and the Barnes-Hut optimization
-//! and all of the necessary data structures such as VP-trees and
-//! SP-trees.
 mod sptree;
 mod vptree;
 

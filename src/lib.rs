@@ -461,9 +461,13 @@ mod tests {
             (data, Some(labels)) => (data, labels),
         };
         let mut y: Vec<f64> = vec![0.0; n * no_dims];
-        // Run t-SNE.
+        // Run Barnes-Hut t-SNE.
         super::run(
             &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
+        );
+        // Run vanilla t-SNE.
+        super::run(
+            &mut data, n, d, &mut y, no_dims, perplexity, 0.0, false, max_iter, 250, 250,
         );
         // Writing the embedding to a csv file. Useful for wrappers.
         super::wite_csv("embedding.csv", y, 2);

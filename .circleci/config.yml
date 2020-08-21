@@ -7,29 +7,17 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Download rustup
-          command: |
-            wget https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init 
-      - run: 
-          name: Change executable permissions
-          command: | 
-            chmod +x rustup-init
-      - run:
-          name: Install Rust
-          command: |
-            ./rustup-init -y --no-modify-path --default-toolchain nightly
-            rm rustup-init
-            echo 'export PATH=$HOME/.cargo/bin:$PATH' >> $BASH_ENV
-      - run:
-          name: Install Tarpaulin
-          command: cargo install cargo-tarpaulin
-          environment:
-            RUSTFLAGS: --cfg procmacro2_semver_exempt
-      - run:
           name: Generate dummy data
-          command: echo "x,y,z,w,cat\n4.0,12.0,11.1,16.2,0\n22.0,14.9,13.2,13.3,0\n11.2,45.2,34.6,76.4,1\n56.7,8.7,1.34,13.2,1\n13.3,11.2,16.2,22.0,0\n14.9,13.2,88.9,10.4,1\n12.0,11.1,16.2,76.4,0\n1.34,13.2,13.3,76.4,0" >> data.csv
+          command: 
+            echo -e "x,y,z,w,cat\n4.0,12.0,11.1,16.2,0\n22.0,14.9,13.2,13.3,0\n11.2,45.2,34.6,76.4,1\n56.7,8.7,1.34,13.2,1\n13.3,11.2,16.2,22.0,0\n14.9,13.2,88.9,10.4,1\n12.0,11.1,16.2,76.4,0\n1.34,13.2,13.3,76.4,0" > ./data.csv;
+      - run:
+          name: Pull xd009642/tarpaulin
+          command: docker pull xd009642/tarpaulin
       - run:
           name: Generate coverage report
-          command: cargo tarpaulin --out Xml 
+          command: >-
+            docker run --security-opt seccomp=unconfined
+            -v $PWD:/volume xd009642/tarpaulin
+            cargo tarpaulin --out Xml --all-features
       - codecov/upload:
           file: cobertura.xml
