@@ -27,7 +27,7 @@
 //!     &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
 //! );
 //! // Writing the embedding to a csv file. Useful for wrappers.
-//! bhtsne::wite_csv("embedding.csv", y, 2);
+//! bhtsne::write_csv("embedding.csv", y, 2);
 //! ```
 mod tsne;
 
@@ -401,7 +401,7 @@ pub fn load_csv(
 ///
 /// * `dims` - A `usize` representing the dimension of the embedding's space. If the emdedding's space has more than three or less than two dimensions
 /// the resultant file won't have headers.
-pub fn wite_csv(file_path: &str, embedding: Vec<f64>, dims: usize) {
+pub fn write_csv(file_path: &str, embedding: Vec<f64>, dims: usize) {
     let mut wtr: csv::Writer<File> = match csv::Writer::from_path(file_path) {
         Ok(writer) => writer,
         Err(e) => panic!(
@@ -470,6 +470,6 @@ mod tests {
             &mut data, n, d, &mut y, no_dims, perplexity, 0.0, false, max_iter, 250, 250,
         );
         // Writing the embedding to a csv file. Useful for wrappers.
-        super::wite_csv("embedding.csv", y, 2);
+        super::write_csv("embedding.csv", y, 2);
     }
 }
