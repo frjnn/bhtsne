@@ -11,7 +11,7 @@ Barnes-Hut implementation of t-SNE written in Rust. The algorithm is described w
 Be sure that your `Cargo.toml` looks somewhat like this:
 ```toml
 [dependencies]
-bhtsne = "0.1.0"
+bhtsne = "0.2.1"
 ```
 
 ## Examples

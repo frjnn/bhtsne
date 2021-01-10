@@ -1,6 +1,6 @@
 [package]
 name = "bhtsne"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["frjnn <f.iannelli.francesco229@gmail.com>"]
 edition = "2018"
 description = "Vanilla and Barnes-Hut implementations of t-SNE."
