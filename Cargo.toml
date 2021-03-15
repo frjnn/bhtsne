@@ -1,6 +1,6 @@
 [package]
 name = "bhtsne"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["frjnn <f.iannelli.francesco229@gmail.com>"]
 edition = "2018"
 description = "Vanilla and Barnes-Hut implementations of t-SNE."
@@ -9,11 +9,12 @@ license = "MIT"
 keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "machine-learning"]
 categories = ["algorithms", "science", "visualization"]
 readme = "README.md"
+exclude = ["/imgs"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rand = "0.7.3"
-rand_distr = "0.2.2"
+rand = "0.8.3"
+rand_distr = "0.4.0"
 pdqselect = "0.1.0"
 csv = "1.1"

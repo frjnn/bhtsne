@@ -9,68 +9,72 @@
 //! ```
 //! use bhtsne;
 //!
-//! // Dummy variables for dummy data.
-//! let n = 8;
-//! let d = 4;
-//! let theta = 0.5;
-//! let perplexity = 1.0;
-//! let max_iter = 2000;
-//! let no_dims = 2;
-//! // Load data and labels from a csv file. Labes are useful for plotting.
-//! let (mut data, labels) = match bhtsne::load_csv("data.csv", true, true, "target", 0) {
-//!     (data, None) => panic!("This is not supposed to happen!"),
-//!     (data, Some(labels)) => (data, labels),
-//! };
-//! let mut y: Vec<f64> = vec![0.0; n * no_dims];
-//! // Run t-SNE.
+//! // Parameters template.
+//! let n: usize = 8;     // Number of vectors to embed.
+//! let d: usize = 4;     // The dimensionality of the original space.
+//! let theta: f32 = 0.5; // The parameter used by the Barnes-Hut algorithm. When set to 0.0
+//!                       // the exact t-SNE version is used instead.
+//!    
+//! let perplexity = 1.0; // The perplexity of the conditional distribution.
+//! let max_iter = 2000;  // The number of fitting iterations.
+//! let no_dims = 2;      // The dimensionality of the embedded space.
+//!
+//! // Loads data the from a csv file skipping the first row,
+//! // treating it as headers and skipping the 5th column,
+//! // treating it as a class label.
+//! let mut data: Vec<f32> = bhtsne::load_csv("data.csv", true, Some(4));
+//!
+//! // This is the vector for the resulting embedding.
+//! let mut y: Vec<f32> = vec![0.0; n * no_dims];
+//!
+//! // Runs t-SNE.
 //! bhtsne::run(
 //!     &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
 //! );
-//! // Writing the embedding to a csv file. Useful for wrappers.
-//! bhtsne::write_csv("embedding.csv", y, 2);
+//!
+//! // Writes the embedding to a csv file.
+//! bhtsne::write_csv("embedding.csv", y, no_dims);
 //! ```
 mod tsne;
-
 use std::fs::File;
-use std::time::Instant;
 use tsne::*;
 
 /// Performs t-SNE.
 ///
 /// # Arguments
-/// * `x` - A `&mut [f64]` containing the data to embed.
+/// * `x` - `&mut [f32]` containing the data to embed.
 ///
-/// * `n`- A `usize` that represents the number of `d`-dimensional points in `x`.
+/// * `n`- `usize` that represents the number of `d`-dimensional points in `x`.
 ///
-/// * `d` - A `usize` that represents the dimension of each point.
+/// * `d` - `usize` that represents the dimension of each point.
 ///
-/// * `y` - A `&mut [f64]` where to store the resultant embedding.
+/// * `y` - `&mut [f32]` where to store the resultant embedding.
 ///
-/// * `no_dims` -  A `usize` that represents the dimension of the embedded points.
+/// * `no_dims` - `usize` that represents the dimension of the embedded points.
 ///
-/// * `perplexity` - An `f64` representing perplexity value.
+/// * `perplexity` - `f32` representing perplexity value.
 ///
-/// * `theta` - An `f64` representing the theta value. If `theta` is set to `0.0` the __exact__ version of t-SNE will be used,
+/// * `theta` - `f32` representing the theta value. If `theta` is set to `0.0` the __exact__ version of t-SNE will be used,
 /// if set to greater values the __Barnes-Hut__ version will be used instead.
 ///
-/// * `skip_random_init` - A `bool` stating wether to skip the random initialization of `y`.
+/// * `skip_random_init` - `bool` stating whether to skip the random initialization of `y`.
 /// In most cases it should be set to `false`.
 ///
-/// * `max_iter` - A `u64` indicating the maximum number of iterations to perform the fitting.
+/// * `max_iter` -` u64` indicating the maximum number of fitting iterations.
 ///
-/// * `stop_lying_iter` - A `u64` indicating the number of the iteration after which the P distribution
+/// * `stop_lying_iter` - `u64` indicating the number of the iteration after which the P distribution
 /// values become _“true“_.
 ///
-/// * `mom_switch_iter` - A `u64` indicating the number of the iteration after which the momentum's value is
+/// * `mom_switch_iter` - `u64` indicating the number of the iteration after which the momentum's value is
 /// set to its final value.
 pub fn run(
-    x: &mut [f64],
+    x: &mut [f32],
     n: usize,
     d: usize,
-    y: &mut [f64],
+    y: &mut [f32],
     no_dims: usize,
-    perplexity: f64,
-    theta: f64,
+    perplexity: f32,
+    theta: f32,
     skip_random_init: bool,
     max_iter: u64,
     stop_lying_iter: u64,
@@ -83,29 +87,21 @@ pub fn run(
             perplexity
         );
     }
-    print!("Using perplexity: {} \n", perplexity,);
-
     let exact: bool = if theta == 0.0 { true } else { false };
 
     // Set learning parameters.
-    let mut momentum: f64 = 0.5;
-    const FINAL_MOMENTUM: f64 = 0.8;
-    const ETA: f64 = 200.0;
+    let mut momentum: f32 = 0.5;
+    const FINAL_MOMENTUM: f32 = 0.8;
+    const ETA: f32 = 200.0;
 
-    let mut start: Instant;
-    let mut end: Instant;
-
-    let mut dy: Vec<f64> = vec![0.0; n * no_dims];
-    let mut uy: Vec<f64> = vec![0.0; n * no_dims];
-    let mut gains: Vec<f64> = vec![1.0; n * no_dims];
-
-    print!("Computing input similarities...\n");
-    start = Instant::now();
+    let mut dy: Vec<f32> = vec![0.0; n * no_dims];
+    let mut uy: Vec<f32> = vec![0.0; n * no_dims];
+    let mut gains: Vec<f32> = vec![1.0; n * no_dims];
 
     // Normalizing input data to prevent numerical problems.
     zero_mean(x, n, d);
 
-    let mut max_x: f64 = 0.0;
+    let mut max_x: f32 = 0.0;
     for i in 0..(n * d) {
         if x[i].abs() > max_x {
             max_x = x[i].abs();
@@ -115,19 +111,16 @@ pub fn run(
         x[i] /= max_x;
     }
 
-    let mut p: Vec<f64> = Vec::new();
+    let mut p: Vec<f32> = Vec::new();
     let mut row_p: Vec<usize> = Vec::new();
     let mut col_p: Vec<usize> = Vec::new();
-    let mut val_p: Vec<f64> = Vec::new();
+    let mut val_p: Vec<f32> = Vec::new();
 
     if exact {
-        print!("Executing exact version.\n");
-
         p = vec![0.0; n * n];
         // Compute similarities.
         compute_fixed_gaussian_perplexity(x, n, d, &mut p, perplexity);
 
-        print!("Symmetrizing matrix...\n");
         // Symmetrize input similarities.
         let mut nn: usize = 0;
         for _n in 0..n {
@@ -140,7 +133,7 @@ pub fn run(
             nn += n;
         }
 
-        let mut sum_p: f64 = 0.0;
+        let mut sum_p: f32 = 0.0;
         for i in 0..(n * n) {
             sum_p += p[i];
         }
@@ -148,8 +141,6 @@ pub fn run(
             p[i] /= sum_p;
         }
     } else {
-        print!("Executing Barnes-Hut version.\n");
-
         let k: usize = (3.0 * perplexity) as usize;
         row_p = vec![0; n + 1];
         col_p = vec![0; n * k];
@@ -157,10 +148,9 @@ pub fn run(
         // Compute input similarities for approximate algorithm.
         compute_gaussian_perplexity(x, n, d, &mut row_p, &mut col_p, &mut val_p, perplexity, k);
 
-        print!("Symmetrizing matrix...\n");
         symmetrize_matrix(&mut row_p, &mut col_p, &mut val_p, n);
 
-        let mut sum_p: f64 = 0.0;
+        let mut sum_p: f32 = 0.0;
 
         for i in 0..row_p[n] {
             sum_p += val_p[i];
@@ -169,7 +159,6 @@ pub fn run(
             val_p[i] /= sum_p;
         }
     }
-    end = Instant::now();
 
     // Lie about the P values.
     if exact {
@@ -184,31 +173,13 @@ pub fn run(
 
     // Initialize solution randomly.
     if !skip_random_init {
-        print!("Sampling random solution...\n");
         for i in 0..(n * no_dims) {
             y[i] = randn() * 0.0001;
         }
     }
 
-    if exact {
-        print!(
-            "Input similarities computed in {} seconds.\nLearning embedding...\n",
-            end.duration_since(start).as_secs_f32()
-        );
-    } else {
-        print!(
-            "Input similarities computed in {} seconds (sparsity = {}).\nLearning embedding...\n",
-            end.duration_since(start).as_secs_f32(),
-            row_p[n] as f64 / (n * n) as f64
-        );
-    }
-
-    let start_fitting: Instant = Instant::now();
-
     // Main training loop.
     for iter in 0..max_iter {
-        start = Instant::now();
-
         // Compute (approximate) gradient.
         if exact {
             compute_gradient(&mut p, y, n, no_dims, &mut dy);
@@ -258,156 +229,74 @@ pub fn run(
         if iter == mom_switch_iter {
             momentum = FINAL_MOMENTUM;
         }
-
-        if iter == 0 {
-            let c: f64;
-            if exact {
-                c = evaluate_error(&mut p, y, n, no_dims);
-            } else {
-                // Doing approximate computation here!
-                c = evaluate_error_approx(&mut row_p, &mut col_p, &mut val_p, y, n, no_dims, theta)
-            }
-            print!("Iteration 0, error is {}\n", c);
-        }
-
-        if iter > 0 && (iter % 50 == 0 || iter == max_iter - 1) {
-            end = Instant::now();
-            let c: f64;
-
-            if exact {
-                c = evaluate_error(&mut p, y, n, no_dims);
-            } else {
-                c = evaluate_error_approx(&mut row_p, &mut col_p, &mut val_p, y, n, no_dims, theta)
-            }
-
-            print!(
-                "Iteration {}: error is  {} (50 iterations in {} seconds)\n",
-                iter,
-                c,
-                end.duration_since(start).as_secs_f32()
-            );
-        }
     }
-    print!(
-        "Fitting performed in {} seconds.\n",
-        end.duration_since(start_fitting).as_secs_f32()
-    )
 }
 
 /// Loads data from a csv file.
 ///
 /// # Arguments
 ///
-/// * `file_path` - An `&str` that specifies the path of the file to load the data from.
+/// * `file_path` -`&str` that specifies the path of the file to load the data from.
 ///
-/// * `has_headers` - A `bool` value that specifies if the file has headers or not. if `has_headers`
-/// and `has_target` are set to `true` the function will locate the column
-/// specified by `target_hd` and will parse all of that column's records
-/// as data labels thus putting them in the second vector of the result's
-/// pair; in this case `target_col` will be ignored. If `has_headers` is set
-/// to `false` and `has_target` is specified, `target_col` will be used for
-/// the same purpose. When the csv has no target and no headers
-/// `has_headers`must be set to `false` or else the first record of the file
-/// won't be parsed.
+/// * `has_headers` - `bool` value that specifies whether the file has headers or not. if `has_headers`
+/// is set to `true` the function will not parse the first line of the .csv file.
 ///
-/// * `has_target` - A `bool` value that specifies if the file has a target column or not.
-///
-/// * `target_hd` - An `&str` that specifies the target header of the file.
-///
-/// * `target_col` - A `usize` that specifies the target column of the file.
-pub fn load_csv(
-    file_path: &str,
-    has_headers: bool,
-    has_target: bool,
-    target_hd: &str,
-    target_col: usize,
-) -> (Vec<f64>, Option<Vec<String>>) {
+/// * `skip_col` - `Option<usize>` that may specify a column of the file that must not be parsed.
+pub fn load_csv(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> Vec<f32> {
     // Declaring the vectors where we'll put the parsed data.
-    let mut data: Vec<f64> = Vec::new();
-    let mut labels: Vec<String>;
+    let mut data: Vec<f32> = Vec::new();
     // Opening the file.
     let file = match File::open(file_path) {
         Ok(file) => file,
-        Err(e) => panic!("Couldn't open the .csv file: {}", e),
+        Err(e) => panic!("tsne couldn't open the .csv file: {}", e),
     };
     let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(!has_headers)
+        .has_headers(has_headers)
         .from_reader(file);
 
-    // This the variable where we'll store the target column.
-    let mut tc: usize = 0;
-
-    // If a target is present.
-    if has_target {
-        labels = Vec::new();
-        // If the csv has headers we use the specified target header
-        // to find the target column.
-        if has_headers {
-            let headers: csv::StringRecord = match rdr.records().next() {
-                Some(hds) => match hds {
-                    Ok(hds) => hds,
-                    Err(e) => panic!("An error occurred while parsing headers: {}", e),
-                },
-                None => panic!("Error: headers not found."),
-            };
-            for i in 0..headers.len() {
-                let header: String = headers.get(i).unwrap().parse().unwrap();
-                println!("{}", header);
-                if header == target_hd {
-                    tc = i;
+    match skip_col {
+        Some(tc) => {
+            for result in rdr.records() {
+                let record = match result {
+                    Ok(res) => res,
+                    Err(e) => panic!("error while parsing records, {}", e),
+                };
+                for i in 0..record.len() {
+                    if i != tc {
+                        data.push(record.get(i).unwrap().parse().unwrap())
+                    }
                 }
             }
-        } else {
-            // If there are no header but there is a
-            // target we use the specified target column.
-            tc = target_col;
         }
-        for result in rdr.records() {
-            let record = match result {
-                Ok(res) => res,
-                Err(e) => panic!("Error while parsing records, {}", e),
-            };
-            for i in 0..record.len() {
-                if i != tc {
+        None => {
+            for result in rdr.records() {
+                let record = match result {
+                    Ok(res) => res,
+                    Err(e) => panic!("error while parsing records: {}", e),
+                };
+                for i in 0..record.len() {
                     data.push(record.get(i).unwrap().parse().unwrap())
-                } else {
-                    labels.push(record.get(i).unwrap().to_string());
                 }
             }
         }
-        (data, Some(labels))
-    // If there are no headers nor a target just put everything in the data vector.
-    } else {
-        for result in rdr.records() {
-            let record = match result {
-                Ok(res) => res,
-                Err(e) => panic!("Error while parsing records, {}", e),
-            };
-            for i in 0..record.len() {
-                data.push(record.get(i).unwrap().parse().unwrap())
-            }
-        }
-        (data, None)
     }
+    data
 }
 
 /// Writes the embedding to a csv file.
 ///
 /// # Arguments
 ///
-/// * `file_path` - An `&str` that specifies the path of the file to load the data from.
+/// * `file_path` - `&str` that specifies the path of the file to load the data from.
 ///
-/// * `embedding`- An `&mut [f64]` where the embedding is stored.
+/// * `embedding`- `&mut [f32]` where the embedding is stored.
 ///
-/// * `dims` - A `usize` representing the dimension of the embedding's space. If the emdedding's space has more than three or less than two dimensions
+/// * `dims` - `usize` representing the dimension of the embedding's space. If the emdedding's space has more than three or less than two dimensions
 /// the resultant file won't have headers.
-pub fn write_csv(file_path: &str, embedding: Vec<f64>, dims: usize) {
+pub fn write_csv(file_path: &str, embedding: Vec<f32>, dims: usize) {
     let mut wtr: csv::Writer<File> = match csv::Writer::from_path(file_path) {
         Ok(writer) => writer,
-        Err(e) => panic!(
-            "An error has occurred during the opening of the file : {}",
-            e
-        ),
+        Err(e) => panic!("error during the opening of the file : {}", e),
     };
     // String-ify the embedding.
     let to_write: Vec<String> = embedding
@@ -418,28 +307,25 @@ pub fn write_csv(file_path: &str, embedding: Vec<f64>, dims: usize) {
     match dims {
         2 => match wtr.write_record(&["x", "y"]) {
             Ok(_) => (),
-            Err(e) => panic!("Error during write: {}", e),
+            Err(e) => panic!("error during write: {}", e),
         },
         3 => match wtr.write_record(&["x", "y", "z"]) {
             Ok(_) => (),
-            Err(e) => panic!("Error during write: {}", e),
+            Err(e) => panic!("error during write: {}", e),
         },
-        _ => println!(
-            "Found more than three or less than two dimensions, {}.csv won't have an header.",
-            file_path
-        ),
+        _ => (),
     }
     // Write records.
     for chunk in to_write.chunks(dims) {
         match wtr.write_record(chunk) {
             Ok(_) => (),
-            Err(e) => panic!("Error during write: {}", e),
+            Err(e) => panic!("error during write: {}", e),
         }
     }
     // Final flush.
     match wtr.flush() {
         Ok(_) => (),
-        Err(e) => panic!("Couldn't write file: {}", e),
+        Err(e) => panic!("couldn't write file: {}", e),
     }
 }
 
@@ -447,29 +333,25 @@ pub fn write_csv(file_path: &str, embedding: Vec<f64>, dims: usize) {
 mod tests {
     #[test]
     #[cfg(not(tarpaulin_include))]
-    fn it_works() {
-        // Dummy variables for dummy data.
+    fn test_run() {
         let n = 8;
         let d = 4;
         let theta = 0.5;
         let perplexity = 1.0;
         let max_iter = 2000;
         let no_dims = 2;
-        // Load data and labels from a csv file. Labes are useful for plotting.
-        let (mut data, labels) = match super::load_csv("data.csv", true, true, "target", 0) {
-            (data, None) => panic!("This is not supposed to happen!"),
-            (data, Some(labels)) => (data, labels),
-        };
-        let mut y: Vec<f64> = vec![0.0; n * no_dims];
-        // Run Barnes-Hut t-SNE.
+
+        let mut data: Vec<f32> = super::load_csv("data.csv", true, Some(4));
+        let mut y: Vec<f32> = vec![0.0; n * no_dims];
+
         super::run(
             &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
         );
-        // Run vanilla t-SNE.
+
         super::run(
             &mut data, n, d, &mut y, no_dims, perplexity, 0.0, false, max_iter, 250, 250,
         );
-        // Writing the embedding to a csv file. Useful for wrappers.
-        super::write_csv("embedding.csv", y, 2);
+
+        super::write_csv("embedding.csv", y, no_dims);
     }
 }

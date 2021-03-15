@@ -1,12 +1,12 @@
 struct Cell {
     dim: usize,
-    corner: Vec<f64>,
-    width: Vec<f64>,
+    corner: Vec<f32>,
+    width: Vec<f32>,
 }
 
 impl Cell {
     /// Constructs cell.
-    fn new(_dim: usize, _corner: Vec<f64>, _width: Vec<f64>) -> Self {
+    fn new(_dim: usize, _corner: Vec<f32>, _width: Vec<f32>) -> Self {
         Cell {
             dim: _dim,
             corner: _corner,
@@ -15,7 +15,7 @@ impl Cell {
     }
 
     /// Checks whether a point lies in a cell.
-    fn cointains_point(&self, point: &[f64]) -> bool {
+    fn cointains_point(&self, point: &[f32]) -> bool {
         let mut res: bool = false;
         for i in 0..self.dim {
             if self.corner[i] - self.width[i] > point[i] {
@@ -33,7 +33,7 @@ impl Cell {
 }
 
 pub struct SPTree<'a> {
-    buff: Vec<f64>, // A buffer we use when doing force computations.
+    buff: Vec<f32>, // A buffer we use when doing force computations.
     // Properties of this node in the tree
     dimension: usize,
     is_leaf: bool,
@@ -45,8 +45,8 @@ pub struct SPTree<'a> {
     boundary: Cell,
     // Indices in this space-partitioning tree node,
     // corresponding center-of-mass, and list of all children.
-    data: &'a [f64],
-    center_of_mass: Vec<f64>,
+    data: &'a [f32],
+    center_of_mass: Vec<f32>,
     index: [usize; 1],
     // Children.
     children: Vec<SPTree<'a>>,
@@ -55,14 +55,14 @@ pub struct SPTree<'a> {
 
 impl<'a> SPTree<'a> {
     /// Default constructor for SPTree, build tree too!
-    pub fn new(dim: usize, inp_data: &'a [f64], num_points: usize) -> Self {
+    pub fn new(dim: usize, inp_data: &'a [f32], num_points: usize) -> Self {
         // Compute mean, width, and height of current
         // map i.e. boundaries of SPTree.
         let mut n_d: usize = 0;
 
-        let mut mean_y: Vec<f64> = vec![0.0; dim];
-        let mut min_y: Vec<f64> = vec![std::f64::MAX; dim];
-        let mut max_y: Vec<f64> = vec![-std::f64::MAX; dim];
+        let mut mean_y: Vec<f32> = vec![0.0; dim];
+        let mut min_y: Vec<f32> = vec![std::f32::MAX; dim];
+        let mut max_y: Vec<f32> = vec![-std::f32::MAX; dim];
         for n in 0..num_points {
             for d in 0..dim {
                 mean_y[d] += inp_data[n * dim + d];
@@ -78,11 +78,11 @@ impl<'a> SPTree<'a> {
             n_d += dim;
         }
         for d in 0..dim {
-            mean_y[d] /= num_points as f64;
+            mean_y[d] /= num_points as f32;
         }
 
         // Construct SPTree.
-        let mut inp_width: Vec<f64> = vec![0.0; dim];
+        let mut inp_width: Vec<f32> = vec![0.0; dim];
 
         for d in 0..dim {
             let max_mean = max_y[d] - mean_y[d];
@@ -103,9 +103,9 @@ impl<'a> SPTree<'a> {
     /// Auxiliary function: construct SPTree with particular size, build the tree too!
     fn _new(
         inp_dim: usize,
-        inp_data: &'a [f64],
-        inp_corner: Vec<f64>,
-        inp_width: Vec<f64>,
+        inp_data: &'a [f32],
+        inp_corner: Vec<f32>,
+        inp_width: Vec<f32>,
     ) -> Self {
         let mut _no_children: usize = 2;
 
@@ -115,8 +115,8 @@ impl<'a> SPTree<'a> {
 
         let _boundary: Cell = Cell::new(inp_dim, inp_corner, inp_width);
         let _children: Vec<SPTree> = Vec::new();
-        let _center_of_mass: Vec<f64> = vec![0.0; inp_dim];
-        let _buff: Vec<f64> = vec![0.0; inp_dim];
+        let _center_of_mass: Vec<f32> = vec![0.0; inp_dim];
+        let _buff: Vec<f32> = vec![0.0; inp_dim];
         SPTree {
             buff: _buff,
             children: _children,
@@ -135,9 +135,9 @@ impl<'a> SPTree<'a> {
     /// Constructs an empty tree.
     fn new_empty(
         inp_dim: usize,
-        inp_data: &'a [f64],
-        inp_corner: Vec<f64>,
-        inp_width: Vec<f64>,
+        inp_data: &'a [f32],
+        inp_corner: Vec<f32>,
+        inp_width: Vec<f32>,
     ) -> Self {
         SPTree::_new(inp_dim, inp_data, inp_corner, inp_width)
     }
@@ -157,8 +157,8 @@ impl<'a> SPTree<'a> {
             // Online update of cumulative size and center-of-mass.
             self.cum_size += 1;
 
-            let mult1: f64 = (self.cum_size - 1) as f64 / self.cum_size as f64;
-            let mult2: f64 = 1.0 / (self.cum_size) as f64;
+            let mult1: f32 = (self.cum_size - 1) as f32 / self.cum_size as f32;
+            let mult2: f32 = 1.0 / (self.cum_size) as f32;
 
             for d in 0..self.dimension {
                 self.center_of_mass[d] *= mult1;
@@ -221,8 +221,8 @@ impl<'a> SPTree<'a> {
         // Create new children.
         for i in 0..self.no_children {
             let mut div: usize = 1;
-            let mut new_corner: Vec<f64> = vec![0.0; self.dimension];
-            let mut new_width: Vec<f64> = vec![0.0; self.dimension];
+            let mut new_corner: Vec<f32> = vec![0.0; self.dimension];
+            let mut new_width: Vec<f32> = vec![0.0; self.dimension];
 
             for d in 0..self.dimension {
                 new_width[d] = 0.5 * self.boundary.width[d];
@@ -266,12 +266,14 @@ impl<'a> SPTree<'a> {
     /// Checks whether the tree is correct
     pub fn is_correct(&self) -> bool {
         let mut ok: bool = true;
+
         for i in 0..self.size {
-            let point: &[f64] = &self.data[self.index[i] * self.dimension..];
+            let point: &[f32] = &self.data[self.index[i] * self.dimension..];
             if !self.boundary.cointains_point(point) {
                 ok = false;
             }
         }
+
         if ok {
             if !self.is_leaf {
                 let mut correct: bool = true;
@@ -291,9 +293,9 @@ impl<'a> SPTree<'a> {
     pub fn compute_non_edge_forces(
         &mut self,
         point_index: usize,
-        theta: f64,
-        neg_f: &mut [f64],
-        sum_q: &mut f64,
+        theta: f32,
+        neg_f: &mut [f32],
+        sum_q: &mut f32,
     ) {
         // Make sure that we spend no time on empty nodes or self-interactions.
         if self.cum_size == 0 || (self.is_leaf && self.size == 1 && self.index[0] == point_index) {
@@ -301,7 +303,7 @@ impl<'a> SPTree<'a> {
         }
 
         // Compute distance between point and center-of-mass.
-        let mut distance: f64 = 0.0;
+        let mut distance: f32 = 0.0;
         let ind: usize = point_index * self.dimension;
 
         for d in 0..self.dimension {
@@ -312,8 +314,8 @@ impl<'a> SPTree<'a> {
         }
 
         // Check whether we can use this node as a summary.
-        let mut max_width: f64 = 0.0;
-        let mut cur_width: f64;
+        let mut max_width: f32 = 0.0;
+        let mut cur_width: f32;
         for d in 0..self.dimension {
             cur_width = self.boundary.width[d];
             max_width = if max_width > cur_width {
@@ -326,7 +328,7 @@ impl<'a> SPTree<'a> {
         if self.is_leaf || max_width / distance.sqrt() < theta {
             // Compute and add tsne force between point and current node.
             distance = 1.0 / (1.0 + distance);
-            let mut mult: f64 = self.cum_size as f64 * distance;
+            let mut mult: f32 = self.cum_size as f32 * distance;
             *sum_q += mult;
             mult *= distance;
 
@@ -346,14 +348,14 @@ impl<'a> SPTree<'a> {
         &mut self,
         row_p: &mut [usize],
         col_p: &mut [usize],
-        val_p: &mut [f64],
+        val_p: &mut [f32],
         num: usize,
-        pos_f: &mut [f64],
+        pos_f: &mut [f32],
     ) {
         // Loop over all edges in the graph.
         let mut ind1: usize = 0;
         let mut ind2: usize;
-        let mut distance: f64;
+        let mut distance: f32;
 
         for n in 0..num {
             for i in row_p[n]..row_p[n + 1] {

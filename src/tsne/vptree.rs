@@ -2,78 +2,53 @@ use pdqselect::select_by;
 use rand::Rng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::iter::Sum;
-use std::ops::Add;
-use std::ops::Mul;
-use std::ops::Sub;
 
 /// Trait that must be satisfied in order to build the tree. We must have a metric
 /// between its elements.
-pub trait Euclid {
-    type Point;
-    fn euclidean_distance(a: &Self::Point, b: &Self::Point) -> f64;
+pub trait Measurable {
+    fn metric(a: &Self, b: &Self) -> f32;
 }
 
 #[derive(Clone)]
-/// The datapoint struct. It's a wrapper for a slice of `T`.
-pub struct DataPoint<'a, T> {
+/// The datapoint struct.
+pub struct DataPoint<T> {
     pub ind: u64,
-    vec: &'a [T],
+    content: T,
     dims: usize,
 }
 
-impl<'a, T> Euclid for DataPoint<'a, T>
-where
-    T: Copy
-        + From<f64>
-        + Into<f64>
-        + Add<Output = T>
-        + Sub<Output = T>
-        + Mul<Output = T>
-        + Add<Output = T>
-        + Sum,
-{
-    type Point = DataPoint<'a, T>;
-
-    // Euclidean distance between slices of `T`, this works as long as the trait
-    // bounds above are satisfied.
-    fn euclidean_distance(point_a: &DataPoint<T>, point_b: &DataPoint<T>) -> f64 {
-        let vec_v: &[T] = &point_a.vec;
-        let vec_w: &[T] = &point_b.vec;
-        let sum: T = vec_v
+impl<'a> Measurable for DataPoint<&[f32]> {
+    // Euclidean distance between slices of `f32`.
+    fn metric(point_a: &Self, point_b: &DataPoint<&[f32]>) -> f32 {
+        let vec_v: &[f32] = &point_a.content;
+        let vec_w: &[f32] = &point_b.content;
+        let sum: f32 = vec_v
             .iter()
             .zip(vec_w.iter())
             .map(|(v, w)| (*v - *w) * (*v - *w))
             .sum();
-        sum.into().sqrt().into()
+        sum.sqrt().into()
     }
 }
 
-impl<'a, T> DataPoint<'a, T>
+impl<T> DataPoint<T>
 where
-    T: Copy
-        + From<f64>
-        + Into<f64>
-        + Add<Output = T>
-        + Sub<Output = T>
-        + Mul<Output = T>
-        + Add<Output = T>
-        + Sum,
+    Self: Measurable,
 {
     /// A simple constructor.
-    pub fn new(ind: u64, vec: &'a [T], dims: usize) -> DataPoint<'a, T> {
+    pub fn new(ind: u64, content: T, dims: usize) -> DataPoint<T> {
         DataPoint {
             ind: ind,
-            vec: vec,
+            content: content,
             dims: dims,
         }
     }
 
-    /// Implements a comparation between `self` and two other `DataPoints`.
-    fn comparator(&self, a: &'a DataPoint<T>, b: &'a DataPoint<T>) -> Ordering {
-        if Self::euclidean_distance(self, a) < Self::euclidean_distance(self, b) {
+    /// Implements a comparison between `self` and two other `DataPoints`.
+    fn compare(&self, a: &Self, b: &Self) -> Ordering {
+        if Self::metric(self, a) < Self::metric(self, b) {
             Ordering::Less
-        } else if Self::euclidean_distance(self, a) == Self::euclidean_distance(self, b) {
+        } else if Self::metric(self, a) == Self::metric(self, b) {
             Ordering::Equal
         } else {
             Ordering::Greater
@@ -85,7 +60,7 @@ where
 /// left children are closer to point than the radius.
 pub struct Node {
     index: usize,
-    threshold: f64,
+    threshold: f32,
     left: Option<Box<Node>>,
     right: Option<Box<Node>>,
 }
@@ -105,7 +80,7 @@ impl Node {
 /// An item on the intermediate result queue.
 struct HeapItem {
     index: usize,
-    dist: f64,
+    dist: f32,
 }
 
 impl PartialOrd for HeapItem {
@@ -128,54 +103,21 @@ impl Ord for HeapItem {
     }
 }
 
-/// Distance comparator for use in `pdqselect::select_by`.
-struct EuclideanComparator<'a, T>
-where
-    T: Euclid,
-{
-    obj: &'a T,
-}
-
-impl<'a, T> EuclideanComparator<'a, T>
-where
-    T: Clone + Euclid<Point = T>,
-{
-    /// A simple constructor.
-    fn new(obj: &'a T) -> Self {
-        EuclideanComparator { obj: obj }
-    }
-
-    /// Function that compares two objects with the EuclideanComparator's `self.obj`.
-    fn compare(&mut self, obj_a: &T, obj_b: &T) -> Ordering {
-        if T::euclidean_distance(&self.obj, obj_a) < T::euclidean_distance(&self.obj, obj_b) {
-            Ordering::Less
-        } else if T::euclidean_distance(&self.obj, obj_a) == T::euclidean_distance(&self.obj, obj_b)
-        {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
-        }
-    }
-}
-
 /// Vantage Point tree.
-pub struct VPTree<'a, T>
-where
-    T: Clone,
-{
-    items: &'a mut [&'a T],
-    tau: f64,
+pub struct VPTree<'a, T> {
+    items: &'a mut [&'a DataPoint<T>],
+    tau: f32,
     pub root: Option<Box<Node>>,
 }
 
 impl<'a, T> VPTree<'a, T>
 where
-    T: Clone + Euclid<Point = T>,
+    DataPoint<T>: Measurable,
 {
     /// Function that recursively fills the tree.
     fn build_from_points(
         root: &mut Option<Box<Node>>,
-        items: &mut [&T],
+        items: &mut [&DataPoint<T>],
         lower: usize,
         upper: usize,
     ) {
@@ -191,18 +133,19 @@ where
         if upper - lower > 1 {
             // If we did not arrive at leaf yet choose an arbitrary point
             // and move it to the start.
-            let i: usize = rand::thread_rng().gen_range(lower, upper) as usize;
+            let i: usize = rand::thread_rng().gen_range(lower..upper) as usize;
             items.swap(lower, i);
 
             // Partition around the median distance.
             let median: usize = (upper + lower) / 2;
 
-            let mut comp: EuclideanComparator<T> = EuclideanComparator { obj: items[lower] };
-            let mut c = |&a: &&T, &b: &&T| -> Ordering { comp.compare(a, b) };
+            let to_cmp = items[lower];
+            let mut c =
+                |&a: &&DataPoint<T>, &b: &&DataPoint<T>| -> Ordering { to_cmp.compare(a, b) };
             select_by(&mut items[lower + 1..upper], median, &mut c);
 
             // Threshold of the new node will be the distance to the median.
-            node.threshold = T::euclidean_distance(&items[lower], &items[median]);
+            node.threshold = DataPoint::<T>::metric(&items[lower], &items[median]);
             // Recursively build tree.
             node.index = lower;
             VPTree::build_from_points(&mut node.left, items, lower + 1, median);
@@ -213,10 +156,10 @@ where
 
     /// Auxiliary function that searches for the k nearest neighbors of an item.
     fn _search(
-        items: &[&T],
-        tau: &mut f64,
+        items: &[&DataPoint<T>],
+        tau: &mut f32,
         node: &Option<Box<Node>>,
-        target: &T,
+        target: &DataPoint<T>,
         k: usize,
         heap: &mut BinaryHeap<HeapItem>,
     ) {
@@ -227,7 +170,7 @@ where
         };
 
         // Compute distance between target and current node.
-        let dist: f64 = T::euclidean_distance(items[node.index], target);
+        let dist: f32 = DataPoint::<T>::metric(items[node.index], target);
         if dist < *tau {
             // If current node is within the radius tau
             // remove furthest node from result list (if we already have k results),
@@ -275,9 +218,9 @@ where
     }
 
     /// Default constructor for the `VPTree` struct.
-    pub fn new(items: &'a mut [&'a T]) -> Self
+    pub fn new(items: &'a mut [&'a DataPoint<T>]) -> Self
     where
-        T: Clone + Euclid<Point = T>,
+        DataPoint<T>: Measurable,
     {
         let mut tree: VPTree<T> = VPTree {
             items: items,
@@ -290,11 +233,17 @@ where
     }
 
     /// Function that uses the tree to find the k nearest neighbors of `target`.
-    pub fn search(&mut self, target: &T, k: usize, results: &mut Vec<T>, distances: &mut Vec<f64>) {
+    pub fn search(
+        &mut self,
+        target: &DataPoint<T>,
+        k: usize,
+        results: &mut Vec<u64>,
+        distances: &mut Vec<f32>,
+    ) {
         // Use a priority queue to store intermediate results on.
         let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
         // Variable that tracks the distance to the farthest point in our results.
-        self.tau = std::f64::MAX;
+        self.tau = std::f32::MAX;
 
         // Perform the search.
         VPTree::_search(
@@ -312,7 +261,7 @@ where
         // Gather final results.
         while !heap.is_empty() {
             let el: HeapItem = heap.pop().unwrap();
-            results.push(self.items[el.index].clone());
+            results.push(self.items[el.index].ind);
             distances.push(el.dist);
         }
         // Results are in reverse order.
