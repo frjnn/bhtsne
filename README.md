@@ -11,7 +11,7 @@ Barnes-Hut implementation of t-SNE written in Rust. The algorithm is described w
 Add this line to your `Cargo.toml`:
 ```toml
 [dependencies]
-bhtsne = "0.3.0"
+bhtsne = "0.3.1"
 ```
 
 ## Example
@@ -40,7 +40,7 @@ bhtsne::run(
     &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
 );
 // Writes the embedding to a csv file.
-bhtsne::write_csv("embedding.csv", y, 2);
+bhtsne::write_csv("embedding.csv", y, no_dims);
 ```
 Also check the docs available on [crates.io](https://crates.io/crates/bhtsne).
 

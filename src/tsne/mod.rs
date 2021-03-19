@@ -1,7 +1,6 @@
 mod sptree;
 mod vptree;
 
-use rand_distr::{Distribution, Normal};
 use sptree::SPTree;
 use vptree::{DataPoint, VPTree};
 
@@ -13,7 +12,7 @@ pub fn compute_gradient(p: &mut [f32], y: &[f32], n: usize, d: usize, dc: &mut [
     }
 
     let mut dd: Vec<f32> = vec![0.0; n * n];
-    // Compute the squared Euclidean distance matrix recursively.
+    // Compute the squared Euclidean distance matrix.
     compute_squared_euclidean_distance(y, n, d, &mut dd);
 
     // Compute Q-matrix and normalization sum.
@@ -38,8 +37,7 @@ pub fn compute_gradient(p: &mut [f32], y: &[f32], n: usize, d: usize, dc: &mut [
         let mut md: usize = 0;
         for m in 0..n {
             if _n != m {
-                let mult: f32 = (p[nn + m] - q[nn + m] / sum_q) * q[nn + m];
-
+                let mult: f32 = (p[nn + m] - (q[nn + m] / sum_q)) * q[nn + m];
                 for _d in 0..d {
                     dc[nd + _d] += (y[nd + _d] - y[md + _d]) * mult;
                 }
@@ -79,7 +77,7 @@ pub fn compute_gradient_approx(
     }
 }
 
-/// Evaluate tnse cost function exactly.
+/// Evaluate t-SNE cost function exactly.
 pub fn evaluate_error(p: &mut [f32], y: &[f32], n: usize, d: usize) -> f32 {
     let mut dd: Vec<f32> = vec![0.0; n * n];
     let mut q: Vec<f32> = vec![0.0; n * n];
@@ -175,6 +173,7 @@ pub fn compute_fixed_gaussian_perplexity(
 
     // Compute the gaussian kernel row by row.
     let mut nn: usize = 0;
+
     for _n in 0..n {
         let mut found: bool = false;
         let mut beta: f32 = 1.0;
@@ -193,6 +192,7 @@ pub fn compute_fixed_gaussian_perplexity(
                 p[nn + m] = (-beta * dd[nn + m]).exp();
             }
             p[nn + _n] = std::f32::MIN_POSITIVE;
+
             // Compute entropy of current row.
             sum_p = std::f32::MIN_POSITIVE;
             for m in 0..n {
@@ -203,10 +203,11 @@ pub fn compute_fixed_gaussian_perplexity(
             for m in 0..n {
                 h += beta * (dd[nn + m] * p[nn + m]);
             }
-            h = h / sum_p + sum_p.ln();
+            h = (h / sum_p) + sum_p.ln();
 
             // Evaluate whether the entropy is within the tolerance level.
             let h_diff: f32 = h - perplexity.ln();
+
             if h_diff < TOL && -h_diff < TOL {
                 found = true;
             } else {
@@ -226,6 +227,13 @@ pub fn compute_fixed_gaussian_perplexity(
                     } else {
                         beta = (beta + min_beta) / 2.0;
                     }
+                }
+                // Check for overflows.
+                if beta.is_infinite() && beta.is_sign_positive() {
+                    beta = std::f32::MAX
+                }
+                if beta.is_infinite() && beta.is_sign_negative() {
+                    beta = -std::f32::MAX
                 }
             }
             // Update iteration counter.
@@ -320,6 +328,13 @@ pub fn compute_gaussian_perplexity(
                     } else {
                         beta = (beta + min_beta) / 2.0;
                     }
+                }
+                // Check for overflows.
+                if beta.is_infinite() && beta.is_sign_positive() {
+                    beta = std::f32::MAX
+                }
+                if beta.is_infinite() && beta.is_sign_negative() {
+                    beta = -std::f32::MAX
                 }
             }
             // Update iteration counter.
@@ -429,28 +444,28 @@ pub fn symmetrize_matrix(
 
 /// Compute squared Euclidean distance matrix.
 pub fn compute_squared_euclidean_distance(x: &[f32], n: usize, d: usize, dd: &mut [f32]) {
-    let mut xnd = 0;
-    for _n in 0..n {
-        let mut xmd = xnd + d;
-        let mut curr_idx = _n * n + _n;
+    let mut ptr: &[f32] = x;
+    let mut i = 0;
 
-        dd[curr_idx] = 0.0;
+    while ptr.len() > d {
+        let mut j = i * (n + 1);
+        dd[j] = 0.0;
+        j += 1;
 
-        let mut curr_sym = curr_idx + n;
-
-        for _ in _n + 1..n {
-            dd[curr_idx] = 0.0;
-            curr_idx += 1;
-
-            for i in 0..d {
-                dd[curr_idx] += (x[xnd + i] - x[xmd + i]) * (x[xnd + i] - x[xmd + i]);
-            }
-            dd[curr_sym] = dd[curr_idx];
-
-            xmd += d;
-            curr_sym += n;
+        let (v, o): (&[f32], &[f32]) = ptr.split_at(d);
+        for chunk in o.chunks(d) {
+            dd[j] = {
+                let mut ed: f32 = 0.0;
+                for _d in 0..d {
+                    ed += (v[_d] - chunk[_d]) * (v[_d] - chunk[_d])
+                }
+                ed
+            };
+            dd[(n * j) % (n * n - 1)] = dd[j];
+            j += 1;
         }
-        xnd += d;
+        ptr = o;
+        i += 1;
     }
 }
 
@@ -477,11 +492,4 @@ pub fn zero_mean(x: &mut [f32], n: usize, d: usize) {
         }
         n_d += d;
     }
-}
-
-/// Generates a Gaussian random number.
-pub fn randn() -> f32 {
-    Normal::new(0.0, 1e-4)
-        .unwrap()
-        .sample(&mut rand::thread_rng())
 }

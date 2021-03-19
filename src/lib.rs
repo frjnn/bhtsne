@@ -36,8 +36,11 @@
 //! bhtsne::write_csv("embedding.csv", y, no_dims);
 //! ```
 mod tsne;
-use std::fs::File;
+use rand_distr::{Distribution, Normal};
 use tsne::*;
+
+#[cfg(feature = "csv")]
+use std::fs::File;
 
 /// Performs t-SNE.
 ///
@@ -83,7 +86,7 @@ pub fn run(
     // Determine whether we are using the exact algorithm.
     if n - 1 < 3 * perplexity as usize {
         panic!(
-            "Perplexity: {} too large for the number of data points!\n",
+            "error: perplexity= {} too large for the number of data points.\n",
             perplexity
         );
     }
@@ -127,7 +130,7 @@ pub fn run(
             let mut mn: usize = (_n + 1) * n;
             for m in (_n + 1)..n {
                 p[nn + m] += p[mn + _n];
-                p[mn + _n] += p[nn + m];
+                p[mn + _n] = p[nn + m];
                 mn += n;
             }
             nn += n;
@@ -173,8 +176,11 @@ pub fn run(
 
     // Initialize solution randomly.
     if !skip_random_init {
+        // Generates a Gaussian random number.
+        let n_distr = Normal::new(0.0, 1e-4).unwrap();
+
         for i in 0..(n * no_dims) {
-            y[i] = randn() * 0.0001;
+            y[i] = n_distr.sample(&mut rand::thread_rng()) * 0.0001;
         }
     }
 
@@ -242,13 +248,14 @@ pub fn run(
 /// is set to `true` the function will not parse the first line of the .csv file.
 ///
 /// * `skip_col` - `Option<usize>` that may specify a column of the file that must not be parsed.
+#[cfg(feature = "csv")]
 pub fn load_csv(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> Vec<f32> {
     // Declaring the vectors where we'll put the parsed data.
     let mut data: Vec<f32> = Vec::new();
     // Opening the file.
     let file = match File::open(file_path) {
         Ok(file) => file,
-        Err(e) => panic!("tsne couldn't open the .csv file: {}", e),
+        Err(e) => panic!("error: tsne couldn't open the .csv file, {}", e),
     };
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(has_headers)
@@ -259,7 +266,7 @@ pub fn load_csv(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> 
             for result in rdr.records() {
                 let record = match result {
                     Ok(res) => res,
-                    Err(e) => panic!("error while parsing records, {}", e),
+                    Err(e) => panic!("error: while parsing records, {}", e),
                 };
                 for i in 0..record.len() {
                     if i != tc {
@@ -272,7 +279,7 @@ pub fn load_csv(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> 
             for result in rdr.records() {
                 let record = match result {
                     Ok(res) => res,
-                    Err(e) => panic!("error while parsing records: {}", e),
+                    Err(e) => panic!("error: while parsing records, {}", e),
                 };
                 for i in 0..record.len() {
                     data.push(record.get(i).unwrap().parse().unwrap())
@@ -287,16 +294,17 @@ pub fn load_csv(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> 
 ///
 /// # Arguments
 ///
-/// * `file_path` - `&str` that specifies the path of the file to load the data from.
+/// * `file_path` - `&str` that specifies the path of the file to write the embedding to.
 ///
 /// * `embedding`- `&mut [f32]` where the embedding is stored.
 ///
 /// * `dims` - `usize` representing the dimension of the embedding's space. If the emdedding's space has more than three or less than two dimensions
 /// the resultant file won't have headers.
+#[cfg(feature = "csv")]
 pub fn write_csv(file_path: &str, embedding: Vec<f32>, dims: usize) {
     let mut wtr: csv::Writer<File> = match csv::Writer::from_path(file_path) {
         Ok(writer) => writer,
-        Err(e) => panic!("error during the opening of the file : {}", e),
+        Err(e) => panic!("error: during the opening of the file : {}", e),
     };
     // String-ify the embedding.
     let to_write: Vec<String> = embedding
@@ -307,11 +315,11 @@ pub fn write_csv(file_path: &str, embedding: Vec<f32>, dims: usize) {
     match dims {
         2 => match wtr.write_record(&["x", "y"]) {
             Ok(_) => (),
-            Err(e) => panic!("error during write: {}", e),
+            Err(e) => panic!("error: during write, {}", e),
         },
         3 => match wtr.write_record(&["x", "y", "z"]) {
             Ok(_) => (),
-            Err(e) => panic!("error during write: {}", e),
+            Err(e) => panic!("error: during write, {}", e),
         },
         _ => (),
     }
@@ -319,13 +327,13 @@ pub fn write_csv(file_path: &str, embedding: Vec<f32>, dims: usize) {
     for chunk in to_write.chunks(dims) {
         match wtr.write_record(chunk) {
             Ok(_) => (),
-            Err(e) => panic!("error during write: {}", e),
+            Err(e) => panic!("error: during write, {}", e),
         }
     }
     // Final flush.
     match wtr.flush() {
         Ok(_) => (),
-        Err(e) => panic!("couldn't write file: {}", e),
+        Err(e) => panic!("error: couldn't write file, {}", e),
     }
 }
 
