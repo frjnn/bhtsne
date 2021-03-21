@@ -11,7 +11,7 @@ Barnes-Hut implementation of t-SNE written in Rust. The algorithm is described w
 Add this line to your `Cargo.toml`:
 ```toml
 [dependencies]
-bhtsne = "0.3.1"
+bhtsne = "0.4.0"
 ```
 
 ## Example
@@ -19,15 +19,15 @@ bhtsne = "0.3.1"
 ```rust
 use bhtsne;
 
-// Parameters template.
+// Parameters template. One can also use f64s.
 let n: usize = 8;     // Number of vectors to embed.
 let d: usize = 4;     // The dimensionality of the original space.
 let theta: f32 = 0.5; // The parameter used by the Barnes-Hut algorithm. When set to 0.0
                       // the exact t-SNE version is used instead.
    
-let perplexity = 1.0; // The perplexity of the conditional distribution.
-let max_iter = 2000;  // The number of fitting iterations.
-let no_dims = 2;      // The dimensionality of the embedded space.
+let perplexity: f32 = 1.0;      // The perplexity of the conditional distribution.
+let max_iter: u64 = 2000;       // The number of fitting iterations.
+let no_dims: usize = 2;         // The dimensionality of the embedded space.
 
 // Loads data the from a csv file skipping the first row,
 // treating it as headers and skipping the 5th column,
