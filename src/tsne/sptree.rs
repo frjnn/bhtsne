@@ -1,12 +1,20 @@
-struct Cell {
+use super::super::{Float, NumCast};
+
+struct Cell<T>
+where
+    T: Float,
+{
     dim: usize,
-    corner: Vec<f32>,
-    width: Vec<f32>,
+    corner: Vec<T>,
+    width: Vec<T>,
 }
 
-impl Cell {
+impl<T> Cell<T>
+where
+    T: Float,
+{
     /// Constructs cell.
-    fn new(_dim: usize, _corner: Vec<f32>, _width: Vec<f32>) -> Self {
+    fn new(_dim: usize, _corner: Vec<T>, _width: Vec<T>) -> Self {
         Cell {
             dim: _dim,
             corner: _corner,
@@ -15,13 +23,13 @@ impl Cell {
     }
 
     /// Checks whether a point lies in a cell.
-    fn cointains_point(&self, point: &[f32]) -> bool {
+    fn cointains_point(&self, point: &[T]) -> bool {
         let mut res: bool = false;
-        for i in 0..self.dim {
-            if self.corner[i] - self.width[i] > point[i] {
+        for (i, el) in point.iter().enumerate() {
+            if self.corner[i] - self.width[i] > *el {
                 break;
             }
-            if self.corner[i] + self.width[i] < point[i] {
+            if self.corner[i] + self.width[i] < *el {
                 break;
             }
             if i == self.dim - 1 {
@@ -32,8 +40,11 @@ impl Cell {
     }
 }
 
-pub struct SPTree<'a> {
-    buff: Vec<f32>, // A buffer we use when doing force computations.
+pub struct SPTree<'a, T>
+where
+    T: Float,
+{
+    buff: Vec<T>, // A buffer we use when doing force computations.
     // Properties of this node in the tree
     dimension: usize,
     is_leaf: bool,
@@ -42,27 +53,38 @@ pub struct SPTree<'a> {
     // Axis-aligned bounding box stored as a
     // center with half-dimensions to represent
     // the boundaries of this quad tree.
-    boundary: Cell,
+    boundary: Cell<T>,
     // Indices in this space-partitioning tree node,
     // corresponding center-of-mass, and list of all children.
-    data: &'a [f32],
-    center_of_mass: Vec<f32>,
+    data: &'a [T],
+    center_of_mass: Vec<T>,
     index: [usize; 1],
     // Children.
-    children: Vec<SPTree<'a>>,
+    children: Vec<SPTree<'a, T>>,
     no_children: usize,
 }
 
-impl<'a> SPTree<'a> {
+impl<'a, T> SPTree<'a, T>
+where
+    T: Float
+        + NumCast
+        + std::ops::AddAssign
+        + std::ops::MulAssign
+        + std::ops::DivAssign
+        + std::ops::Add
+        + std::ops::Mul
+        + std::ops::Div,
+{
     /// Default constructor for SPTree, build tree too!
-    pub fn new(dim: usize, inp_data: &'a [f32], num_points: usize) -> Self {
+    pub fn new(dim: usize, inp_data: &'a [T], num_points: usize) -> Self {
         // Compute mean, width, and height of current
         // map i.e. boundaries of SPTree.
         let mut n_d: usize = 0;
 
-        let mut mean_y: Vec<f32> = vec![0.0; dim];
-        let mut min_y: Vec<f32> = vec![std::f32::MAX; dim];
-        let mut max_y: Vec<f32> = vec![-std::f32::MAX; dim];
+        let mut mean_y: Vec<T> = vec![T::zero(); dim];
+        let mut min_y: Vec<T> = vec![T::max_value(); dim];
+        let mut max_y: Vec<T> = vec![-T::max_value(); dim];
+
         for n in 0..num_points {
             for d in 0..dim {
                 mean_y[d] += inp_data[n * dim + d];
@@ -77,46 +99,41 @@ impl<'a> SPTree<'a> {
             }
             n_d += dim;
         }
-        for d in 0..dim {
-            mean_y[d] /= num_points as f32;
+        for el in &mut mean_y[..] {
+            *el /= T::from(num_points).unwrap();
         }
 
         // Construct SPTree.
-        let mut inp_width: Vec<f32> = vec![0.0; dim];
+        let mut inp_width: Vec<T> = vec![T::zero(); dim];
 
         for d in 0..dim {
             let max_mean = max_y[d] - mean_y[d];
             let mean_min = mean_y[d] - min_y[d];
 
             inp_width[d] = if max_mean >= mean_min {
-                max_mean + 1e-5
+                max_mean + T::from(1e-5).unwrap()
             } else {
-                mean_min + 1e-5
+                mean_min + T::from(1e-5).unwrap()
             };
         }
 
-        let mut empty_tree: SPTree = SPTree::_new(dim, inp_data, mean_y, inp_width);
+        let mut empty_tree: SPTree<T> = SPTree::_new(dim, inp_data, mean_y, inp_width);
         empty_tree.fill(num_points);
         empty_tree
     }
 
     /// Auxiliary function: construct SPTree with particular size, build the tree too!
-    fn _new(
-        inp_dim: usize,
-        inp_data: &'a [f32],
-        inp_corner: Vec<f32>,
-        inp_width: Vec<f32>,
-    ) -> Self {
+    fn _new(inp_dim: usize, inp_data: &'a [T], inp_corner: Vec<T>, inp_width: Vec<T>) -> Self {
         let mut _no_children: usize = 2;
 
         for _ in 1..inp_dim {
             _no_children *= 2;
         }
 
-        let _boundary: Cell = Cell::new(inp_dim, inp_corner, inp_width);
-        let _children: Vec<SPTree> = Vec::new();
-        let _center_of_mass: Vec<f32> = vec![0.0; inp_dim];
-        let _buff: Vec<f32> = vec![0.0; inp_dim];
+        let _boundary: Cell<T> = Cell::new(inp_dim, inp_corner, inp_width);
+        let _children: Vec<SPTree<T>> = Vec::new();
+        let _center_of_mass: Vec<T> = vec![T::zero(); inp_dim];
+        let _buff: Vec<T> = vec![T::zero(); inp_dim];
         SPTree {
             buff: _buff,
             children: _children,
@@ -133,12 +150,7 @@ impl<'a> SPTree<'a> {
     }
 
     /// Constructs an empty tree.
-    fn new_empty(
-        inp_dim: usize,
-        inp_data: &'a [f32],
-        inp_corner: Vec<f32>,
-        inp_width: Vec<f32>,
-    ) -> Self {
+    fn new_empty(inp_dim: usize, inp_data: &'a [T], inp_corner: Vec<T>, inp_width: Vec<T>) -> Self {
         SPTree::_new(inp_dim, inp_data, inp_corner, inp_width)
     }
 
@@ -157,8 +169,9 @@ impl<'a> SPTree<'a> {
             // Online update of cumulative size and center-of-mass.
             self.cum_size += 1;
 
-            let mult1: f32 = (self.cum_size - 1) as f32 / self.cum_size as f32;
-            let mult2: f32 = 1.0 / (self.cum_size) as f32;
+            let mult1: T =
+                T::from(self.cum_size - 1).unwrap() / T::from(self.cum_size).unwrap();
+            let mult2: T = T::one() / T::from(self.cum_size).unwrap();
 
             for d in 0..self.dimension {
                 self.center_of_mass[d] *= mult1;
@@ -221,15 +234,17 @@ impl<'a> SPTree<'a> {
         // Create new children.
         for i in 0..self.no_children {
             let mut div: usize = 1;
-            let mut new_corner: Vec<f32> = vec![0.0; self.dimension];
-            let mut new_width: Vec<f32> = vec![0.0; self.dimension];
+            let mut new_corner: Vec<T> = vec![T::zero(); self.dimension];
+            let mut new_width: Vec<T> = vec![T::zero(); self.dimension];
 
             for d in 0..self.dimension {
-                new_width[d] = 0.5 * self.boundary.width[d];
+                new_width[d] = T::from(0.5).unwrap() * self.boundary.width[d];
                 if (i / div) % 2 == 1 {
-                    new_corner[d] = self.boundary.corner[d] - 0.5 * self.boundary.width[d];
+                    new_corner[d] = self.boundary.corner[d]
+                        - T::from(0.5).unwrap() * self.boundary.width[d];
                 } else {
-                    new_corner[d] = self.boundary.corner[d] + 0.5 * self.boundary.width[d];
+                    new_corner[d] = self.boundary.corner[d]
+                        + T::from(0.5).unwrap() * self.boundary.width[d];
                 }
                 div *= 2;
             }
@@ -264,11 +279,12 @@ impl<'a> SPTree<'a> {
     }
 
     /// Checks whether the tree is correct
+    #[allow(dead_code)]
     pub fn is_correct(&self) -> bool {
         let mut ok: bool = true;
 
         for i in 0..self.size {
-            let point: &[f32] = &self.data[self.index[i] * self.dimension..];
+            let point: &[T] = &self.data[self.index[i] * self.dimension..];
             if !self.boundary.cointains_point(point) {
                 ok = false;
             }
@@ -293,9 +309,9 @@ impl<'a> SPTree<'a> {
     pub fn compute_non_edge_forces(
         &mut self,
         point_index: usize,
-        theta: f32,
-        neg_f: &mut [f32],
-        sum_q: &mut f32,
+        theta: T,
+        neg_f: &mut [T],
+        sum_q: &mut T,
     ) {
         // Make sure that we spend no time on empty nodes or self-interactions.
         if self.cum_size == 0 || (self.is_leaf && self.size == 1 && self.index[0] == point_index) {
@@ -303,7 +319,7 @@ impl<'a> SPTree<'a> {
         }
 
         // Compute distance between point and center-of-mass.
-        let mut distance: f32 = 0.0;
+        let mut distance: T = T::zero();
         let ind: usize = point_index * self.dimension;
 
         for d in 0..self.dimension {
@@ -314,8 +330,8 @@ impl<'a> SPTree<'a> {
         }
 
         // Check whether we can use this node as a summary.
-        let mut max_width: f32 = 0.0;
-        let mut cur_width: f32;
+        let mut max_width: T = T::zero();
+        let mut cur_width: T;
         for d in 0..self.dimension {
             cur_width = self.boundary.width[d];
             max_width = if max_width > cur_width {
@@ -327,13 +343,13 @@ impl<'a> SPTree<'a> {
 
         if self.is_leaf || max_width / distance.sqrt() < theta {
             // Compute and add tsne force between point and current node.
-            distance = 1.0 / (1.0 + distance);
-            let mut mult: f32 = self.cum_size as f32 * distance;
+            distance = T::one() / (T::one() + distance);
+            let mut mult: T = T::from(self.cum_size).unwrap() * distance;
             *sum_q += mult;
             mult *= distance;
 
-            for d in 0..self.dimension {
-                neg_f[d] += mult * self.buff[d];
+            for (i, el) in neg_f.iter_mut().enumerate() {
+                *el += mult * self.buff[i];
             }
         } else {
             // Recursively apply Barnes-Hut to children.
@@ -348,19 +364,19 @@ impl<'a> SPTree<'a> {
         &mut self,
         row_p: &mut [usize],
         col_p: &mut [usize],
-        val_p: &mut [f32],
+        val_p: &mut [T],
         num: usize,
-        pos_f: &mut [f32],
+        pos_f: &mut [T],
     ) {
         // Loop over all edges in the graph.
         let mut ind1: usize = 0;
         let mut ind2: usize;
-        let mut distance: f32;
+        let mut distance: T;
 
         for n in 0..num {
             for i in row_p[n]..row_p[n + 1] {
                 // Compute pairwise distance and Q-value.
-                distance = 1.0;
+                distance = T::one();
                 ind2 = col_p[i] * self.dimension;
 
                 for d in 0..self.dimension {

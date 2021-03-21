@@ -1,29 +1,33 @@
 mod sptree;
 mod vptree;
 
+use super::{Float, NumCast};
 use sptree::SPTree;
 use vptree::{DataPoint, VPTree};
 
 /// Computes the exact t-SNE gradient.
-pub fn compute_gradient(p: &mut [f32], y: &[f32], n: usize, d: usize, dc: &mut [f32]) {
+pub fn compute_gradient<T>(p: &mut [T], y: &[T], n: usize, d: usize, dc: &mut [T])
+where
+    T: Float + std::ops::Add + std::ops::Sub + std::ops::Mul + std::ops::AddAssign + std::iter::Sum,
+{
     // Make sure the current gradient contains zeros.
-    for i in 0..(n * d) {
-        dc[i] = 0.0;
+    for el in &mut dc[..] {
+        *el = T::zero();
     }
 
-    let mut dd: Vec<f32> = vec![0.0; n * n];
+    let mut dd: Vec<T> = vec![T::zero(); n * n];
     // Compute the squared Euclidean distance matrix.
     compute_squared_euclidean_distance(y, n, d, &mut dd);
 
     // Compute Q-matrix and normalization sum.
-    let mut q: Vec<f32> = vec![0.0; n * n];
-    let mut sum_q: f32 = 0.0;
+    let mut q: Vec<T> = vec![T::zero(); n * n];
+    let mut sum_q: T = T::zero();
 
     let mut nn: usize = 0;
     for _n in 0..n {
         for m in 0..n {
             if _n != m {
-                q[nn + m] = 1.0 / (1.0 + dd[nn + m]);
+                q[nn + m] = T::one() / (T::one() + dd[nn + m]);
                 sum_q += q[nn + m];
             }
         }
@@ -37,7 +41,7 @@ pub fn compute_gradient(p: &mut [f32], y: &[f32], n: usize, d: usize, dc: &mut [
         let mut md: usize = 0;
         for m in 0..n {
             if _n != m {
-                let mult: f32 = (p[nn + m] - (q[nn + m] / sum_q)) * q[nn + m];
+                let mult: T = (p[nn + m] - (q[nn + m] / sum_q)) * q[nn + m];
                 for _d in 0..d {
                     dc[nd + _d] += (y[nd + _d] - y[md + _d]) * mult;
                 }
@@ -50,22 +54,30 @@ pub fn compute_gradient(p: &mut [f32], y: &[f32], n: usize, d: usize, dc: &mut [
 }
 
 /// Computes an approximation of the t-SNE gradient.
-pub fn compute_gradient_approx(
+pub fn compute_gradient_approx<T>(
     inp_row_p: &mut [usize],
     inp_col_p: &mut [usize],
-    inp_val_p: &mut [f32],
-    y: &[f32],
+    inp_val_p: &mut [T],
+    y: &[T],
     n: usize,
     d: usize,
-    dc: &mut [f32],
-    theta: f32,
-) {
+    dc: &mut [T],
+    theta: T,
+) where
+    T: Float
+        + std::ops::Sub
+        + std::ops::Div
+        + std::ops::AddAssign
+        + std::ops::MulAssign
+        + std::ops::DivAssign
+        + NumCast,
+{
     // Construct space partitioning tree on current map.
-    let mut tree: SPTree = SPTree::new(d, y, n);
+    let mut tree: SPTree<T> = SPTree::new(d, y, n);
     // Compute all terms required for t-SNE gradient.
-    let mut sum_q: f32 = 0.0;
-    let mut pos_f: Vec<f32> = vec![0.0; n * d];
-    let mut neg_f: Vec<f32> = vec![0.0; n * d];
+    let mut sum_q: T = T::zero();
+    let mut pos_f: Vec<T> = vec![T::zero(); n * d];
+    let mut neg_f: Vec<T> = vec![T::zero(); n * d];
 
     tree.compute_edge_forces(inp_row_p, inp_col_p, inp_val_p, n, &mut pos_f);
     for _n in 0..n {
@@ -78,97 +90,114 @@ pub fn compute_gradient_approx(
 }
 
 /// Evaluate t-SNE cost function exactly.
-pub fn evaluate_error(p: &mut [f32], y: &[f32], n: usize, d: usize) -> f32 {
-    let mut dd: Vec<f32> = vec![0.0; n * n];
-    let mut q: Vec<f32> = vec![0.0; n * n];
+#[allow(dead_code)]
+pub fn evaluate_error<T>(p: &mut [T], y: &[T], n: usize, d: usize) -> T
+where
+    T: Float + std::ops::AddAssign + std::ops::Add + std::ops::DivAssign + std::iter::Sum,
+{
+    let mut dd: Vec<T> = vec![T::zero(); n * n];
+    let mut q: Vec<T> = vec![T::zero(); n * n];
     compute_squared_euclidean_distance(y, n, d, &mut dd);
 
     // Compute Q-matrix and normalization sum.
     let mut nn: usize = 0;
-    let mut sum_q = std::f32::MIN_POSITIVE;
+    let mut sum_q = T::min_positive_value();
     for _n in 0..n {
         for m in 0..n {
             if _n != m {
-                q[nn + m] = 1.0 / (1.0 + dd[nn + m]);
+                q[nn + m] = T::one() / (T::one() + dd[nn + m]);
                 sum_q += q[nn + m];
             } else {
-                q[nn + m] = std::f32::MIN_POSITIVE;
+                q[nn + m] = T::min_positive_value();
             }
         }
         nn += n;
     }
 
-    for i in 0..(n * n) {
-        q[i] /= sum_q;
+    for el in &mut q[..] {
+        *el /= sum_q;
     }
 
-    let mut c: f32 = 0.0;
+    let mut c: T = T::zero();
     for _n in 0..(n * n) {
-        c += p[_n]
-            * ((p[_n] + std::f32::MIN_POSITIVE as f32) / (q[_n] + std::f32::MIN_POSITIVE as f32))
-                .ln()
+        c += p[_n] * ((p[_n] + T::min_positive_value()) / (q[_n] + T::min_positive_value())).ln()
     }
     c
 }
 
 /// Evaluate t-SNE cost function approximately.
-pub fn evaluate_error_approx<'a>(
+#[allow(dead_code)]
+pub fn evaluate_error_approx<'a, T>(
     row_p: &mut [usize],
     col_p: &mut [usize],
-    val_p: &mut [f32],
-    y: &'a [f32],
+    val_p: &mut [T],
+    y: &'a [T],
     n: usize,
     d: usize,
-    theta: f32,
-) -> f32 {
+    theta: T,
+) -> T
+where
+    T: Float
+        + std::ops::AddAssign
+        + std::ops::SubAssign
+        + std::ops::MulAssign
+        + std::ops::DivAssign
+        + NumCast,
+{
     // Get estimate of normalization term.
-    let mut tree: SPTree = SPTree::new(d, y, n);
-    let mut buff: Vec<f32> = vec![0.0; d];
-    let mut sum_q: f32 = 0.0;
+    let mut tree: SPTree<T> = SPTree::new(d, y, n);
+    let mut buff: Vec<T> = vec![T::zero(); d];
+    let mut sum_q: T = T::zero();
     for _n in 0..n {
         tree.compute_non_edge_forces(_n, theta, &mut buff, &mut sum_q);
     }
     // Loop over all edges to compute t-SNE error.
     let mut ind1;
     let mut ind2;
-    let mut c: f32 = 0.0;
+    let mut c: T = T::zero();
     let mut q;
 
     for _n in 0..n {
         ind1 = _n * d;
         for i in row_p[_n]..row_p[_n + 1] {
-            q = 0.0;
+            q = T::zero();
             ind2 = col_p[i] * d;
 
-            for _d in 0..d {
-                buff[_d] = y[ind1 + _d];
+            buff[..d].clone_from_slice(&y[ind1..(d + ind1)]);
+
+            for (i, el) in buff.iter_mut().enumerate() {
+                *el -= y[ind2 + i];
             }
-            for _d in 0..d {
-                buff[_d] -= y[ind2 + _d];
+
+            for el in &buff[..] {
+                q += *el * *el;
             }
-            for _d in 0..d {
-                q += buff[_d] * buff[_d];
-            }
-            q = (1.0 / (1.0 + q)) / sum_q;
+            q = (T::one() / (T::one() + q)) / sum_q;
             c += val_p[i]
-                * ((val_p[i] + std::f32::MIN_POSITIVE as f32)
-                    / (q + std::f32::MIN_POSITIVE as f32))
-                    .ln();
+                * ((val_p[i] + T::min_positive_value()) / (q + T::min_positive_value())).ln();
         }
     }
     c
 }
 
 /// Compute input similarities with a fixed perplexity.
-pub fn compute_fixed_gaussian_perplexity(
-    x: &mut [f32],
+pub fn compute_fixed_gaussian_perplexity<T>(
+    x: &mut [T],
     n: usize,
     d: usize,
-    p: &mut [f32],
-    perplexity: f32,
-) {
+    p: &mut [T],
+    perplexity: T,
+) where
+    T: Float
+        + NumCast
+        + std::ops::Div
+        + std::ops::DivAssign
+        + std::ops::AddAssign
+        + std::ops::MulAssign
+        + std::iter::Sum,
+{
     // Compute the squared Euclidean distance matrix.
-    let mut dd: Vec<f32> = vec![0.0; n * n];
+    let mut dd: Vec<T> = vec![T::zero(); n * n];
     compute_squared_euclidean_distance(x, n, d, &mut dd);
 
     // Compute the gaussian kernel row by row.
@@ -176,12 +205,12 @@ pub fn compute_fixed_gaussian_perplexity(
 
     for _n in 0..n {
         let mut found: bool = false;
-        let mut beta: f32 = 1.0;
-        let mut min_beta: f32 = -std::f32::MAX;
-        let mut max_beta: f32 = std::f32::MAX;
-        const TOL: f32 = 1e-5;
+        let mut beta: T = T::one();
+        let mut min_beta: T = -T::max_value();
+        let mut max_beta: T = T::max_value();
+        let tol: T = T::from(1e-5).unwrap();
 
-        let mut sum_p: f32 = 0.0;
+        let mut sum_p: T = T::zero();
 
         let mut iter: u64 = 0;
 
@@ -191,49 +220,49 @@ pub fn compute_fixed_gaussian_perplexity(
             for m in 0..n {
                 p[nn + m] = (-beta * dd[nn + m]).exp();
             }
-            p[nn + _n] = std::f32::MIN_POSITIVE;
+            p[nn + _n] = T::min_positive_value();
 
             // Compute entropy of current row.
-            sum_p = std::f32::MIN_POSITIVE;
+            sum_p = T::min_positive_value();
             for m in 0..n {
                 sum_p += p[nn + m];
             }
 
-            let mut h: f32 = 0.0;
+            let mut h: T = T::zero();
             for m in 0..n {
                 h += beta * (dd[nn + m] * p[nn + m]);
             }
             h = (h / sum_p) + sum_p.ln();
 
             // Evaluate whether the entropy is within the tolerance level.
-            let h_diff: f32 = h - perplexity.ln();
+            let h_diff: T = h - perplexity.ln();
 
-            if h_diff < TOL && -h_diff < TOL {
+            if h_diff < tol && -h_diff < tol {
                 found = true;
             } else {
-                if h_diff > 0.0 {
+                if h_diff > T::zero() {
                     min_beta = beta;
 
-                    if max_beta == std::f32::MAX || max_beta == -std::f32::MAX {
-                        beta *= 2.0;
+                    if max_beta == T::max_value() || max_beta == -T::max_value() {
+                        beta *= T::from(2.0).unwrap();
                     } else {
-                        beta = (beta + max_beta) / 2.0;
+                        beta = (beta + max_beta) / T::from(2.0).unwrap();
                     }
                 } else {
                     max_beta = beta;
 
-                    if min_beta == -std::f32::MAX || min_beta == std::f32::MAX {
-                        beta /= 2.0;
+                    if min_beta == -T::max_value() || min_beta == T::max_value() {
+                        beta /= T::from(2.0).unwrap();
                     } else {
-                        beta = (beta + min_beta) / 2.0;
+                        beta = (beta + min_beta) / T::from(2.0).unwrap();
                     }
                 }
                 // Check for overflows.
                 if beta.is_infinite() && beta.is_sign_positive() {
-                    beta = std::f32::MAX
+                    beta = T::max_value()
                 }
                 if beta.is_infinite() && beta.is_sign_negative() {
-                    beta = -std::f32::MAX
+                    beta = -T::max_value()
                 }
             }
             // Update iteration counter.
@@ -248,17 +277,24 @@ pub fn compute_fixed_gaussian_perplexity(
 }
 
 /// Compute input similarities with a fixed perplexity using ball trees.
-pub fn compute_gaussian_perplexity(
-    x: &mut [f32],
+pub fn compute_gaussian_perplexity<T>(
+    x: &mut [T],
     n: usize,
     d: usize,
     row_p: &mut Vec<usize>,
     col_p: &mut Vec<usize>,
-    val_p: &mut Vec<f32>,
-    perplexity: f32,
+    val_p: &mut Vec<T>,
+    perplexity: T,
     k: usize,
-) {
-    let mut cur_p: Vec<f32> = vec![0.0; n - 1];
+) where
+    T: Float
+        + NumCast
+        + std::iter::Sum
+        + std::ops::AddAssign
+        + std::ops::MulAssign
+        + std::ops::DivAssign,
+{
+    let mut cur_p: Vec<T> = vec![T::zero(); n - 1];
 
     row_p[0] = 0;
     for _n in 0..n {
@@ -266,18 +302,15 @@ pub fn compute_gaussian_perplexity(
     }
 
     // Build ball tree on data set.
-    let mut index: u64 = 0;
-    let mut items: Vec<DataPoint<&[f32]>> = Vec::new();
-    for chunk in x.chunks_exact(d) {
-        items.push(DataPoint::new(index, chunk, d));
-        index += 1;
+    let mut items: Vec<DataPoint<&[T]>> = Vec::new();
+    for (index, chunk) in x.chunks_exact(d).enumerate() {
+        items.push(DataPoint::new(index as u64, chunk, d));
     }
-    let mut slice_of_ref: Vec<&DataPoint<&[f32]>> =
-        items.iter().collect::<Vec<&DataPoint<&[f32]>>>();
-    let mut tree: VPTree<&[f32]> = VPTree::new(&mut slice_of_ref);
+    let mut slice_of_ref: Vec<&DataPoint<&[T]>> = items.iter().collect::<Vec<&DataPoint<&[T]>>>();
+    let mut tree: VPTree<T> = VPTree::new(&mut slice_of_ref);
 
     let mut indices: Vec<u64> = Vec::new();
-    let mut distances: Vec<f32> = Vec::new();
+    let mut distances: Vec<T> = Vec::new();
 
     // Loop over all points to find nearest neighbors.
     for _n in 0..n {
@@ -285,56 +318,56 @@ pub fn compute_gaussian_perplexity(
         tree.search(&items[_n], k + 1, &mut indices, &mut distances);
         // Initialize some variables for binary search.
         let mut found: bool = false;
-        let mut beta: f32 = 1.0;
-        let mut max_beta: f32 = std::f32::MAX;
-        let mut min_beta: f32 = -std::f32::MAX;
-        const TOL: f32 = 1e-5;
+        let mut beta: T = T::one();
+        let mut max_beta: T = T::max_value();
+        let mut min_beta: T = -T::max_value();
+        let tol: T = T::from(1e-5).unwrap();
 
         let mut iter: u64 = 0;
-        let mut sum_p: f32 = 0.0;
+        let mut sum_p: T = T::zero();
         // Iterate until we found a good perplexity.
         while !found && iter < 200 {
             for m in 0..k {
                 cur_p[m] = (-beta * distances[m + 1] * distances[m + 1]).exp();
             }
             // Compute entropy of current row.
-            sum_p = std::f32::MIN_POSITIVE;
-            for m in 0..k {
-                sum_p += cur_p[m];
+            sum_p = T::min_positive_value();
+            for el in &cur_p[..] {
+                sum_p += *el;
             }
 
-            let mut h: f32 = 0.0;
+            let mut h: T = T::zero();
             for m in 0..k {
                 h += beta * (distances[m + 1] * distances[m + 1] * cur_p[m]);
             }
             h = (h / sum_p) + sum_p.ln();
 
             // Evaluate whether the entropy is within the tolerance level.
-            let h_diff: f32 = h - perplexity.ln();
-            if h_diff < TOL && -h_diff < TOL {
+            let h_diff: T = h - perplexity.ln();
+            if h_diff < tol && -h_diff < tol {
                 found = true;
             } else {
-                if h_diff > 0.0 {
+                if h_diff > T::zero() {
                     min_beta = beta;
-                    if max_beta == std::f32::MAX || max_beta == -std::f32::MAX {
-                        beta *= 2.0
+                    if max_beta == T::max_value() || max_beta == -T::max_value() {
+                        beta *= T::from(2.0).unwrap()
                     } else {
-                        beta = (beta + max_beta) / 2.0;
+                        beta = (beta + max_beta) / T::from(2.0).unwrap();
                     }
                 } else {
                     max_beta = beta;
-                    if min_beta == std::f32::MAX || min_beta == -std::f32::MAX {
-                        beta /= 2.0;
+                    if min_beta == T::max_value() || min_beta == -T::max_value() {
+                        beta /= T::from(2.0).unwrap();
                     } else {
-                        beta = (beta + min_beta) / 2.0;
+                        beta = (beta + min_beta) / T::from(2.0).unwrap();
                     }
                 }
                 // Check for overflows.
                 if beta.is_infinite() && beta.is_sign_positive() {
-                    beta = std::f32::MAX
+                    beta = T::max_value()
                 }
                 if beta.is_infinite() && beta.is_sign_negative() {
-                    beta = -std::f32::MAX
+                    beta = -T::max_value()
                 }
             }
             // Update iteration counter.
@@ -342,8 +375,8 @@ pub fn compute_gaussian_perplexity(
         }
 
         // Row-normalize current row of P and store in matrix.
-        for m in 0..k {
-            cur_p[m] /= sum_p;
+        for el in &mut cur_p[..] {
+            *el /= sum_p;
         }
 
         for m in 0..k {
@@ -354,12 +387,14 @@ pub fn compute_gaussian_perplexity(
 }
 
 /// Symmetrizes a sparse matrix.
-pub fn symmetrize_matrix(
+pub fn symmetrize_matrix<T>(
     row_p: &mut Vec<usize>,
     col_p: &mut Vec<usize>,
-    val_p: &mut Vec<f32>,
+    val_p: &mut Vec<T>,
     n: usize,
-) {
+) where
+    T: Float + NumCast + std::ops::Add + std::ops::DivAssign,
+{
     // Count number of elements and row counts of symmetric matrix.
     let mut row_counts: Vec<usize> = vec![0; n];
 
@@ -367,8 +402,8 @@ pub fn symmetrize_matrix(
         for i in row_p[_n]..row_p[_n + 1] {
             // Check whether element (col_P[i], _n) is present.
             let mut present: bool = false;
-            for m in row_p[col_p[i]]..row_p[col_p[i] + 1] {
-                if col_p[m] == _n {
+            for el in col_p.iter().take(row_p[col_p[i] + 1]).skip(row_p[col_p[i]]) {
+                if *el == _n {
                     present = true;
                 }
             }
@@ -382,13 +417,13 @@ pub fn symmetrize_matrix(
     }
 
     let mut no_el: usize = 0;
-    for _n in 0..n {
-        no_el += row_counts[_n];
+    for el in &row_counts[..] {
+        no_el += *el;
     }
 
     let mut sym_row_p: Vec<usize> = vec![0; n + 1];
     let mut sym_col_p: Vec<usize> = vec![0; no_el];
-    let mut sym_val_p: Vec<f32> = vec![0.0; no_el];
+    let mut sym_val_p: Vec<T> = vec![T::zero(); no_el];
 
     sym_row_p[0] = 0;
     for _n in 0..n {
@@ -422,7 +457,7 @@ pub fn symmetrize_matrix(
                 sym_val_p[sym_row_p[col_p[i]] + offset[col_p[i]]] = val_p[i];
             }
             // Update offsets.
-            if !present || (present && _n <= col_p[i]) {
+            if !present || _n <= col_p[i] {
                 offset[_n] += 1;
                 if col_p[i] != _n {
                     offset[col_p[i]] += 1;
@@ -432,8 +467,8 @@ pub fn symmetrize_matrix(
     }
 
     // Divide the result by two
-    for i in 0..no_el {
-        sym_val_p[i] /= 2.0;
+    for el in &mut sym_val_p[..] {
+        *el /= T::from(2.0).unwrap();
     }
 
     // Return symmetrized matrices.
@@ -443,23 +478,25 @@ pub fn symmetrize_matrix(
 }
 
 /// Compute squared Euclidean distance matrix.
-pub fn compute_squared_euclidean_distance(x: &[f32], n: usize, d: usize, dd: &mut [f32]) {
-    let mut ptr: &[f32] = x;
+pub fn compute_squared_euclidean_distance<T>(x: &[T], n: usize, d: usize, dd: &mut [T])
+where
+    T: Float + std::ops::Sub + std::ops::Mul + std::ops::AddAssign + std::iter::Sum,
+{
+    let mut ptr: &[T] = x;
     let mut i = 0;
 
     while ptr.len() > d {
         let mut j = i * (n + 1);
-        dd[j] = 0.0;
+        dd[j] = T::zero();
         j += 1;
 
-        let (v, o): (&[f32], &[f32]) = ptr.split_at(d);
+        let (v, o): (&[T], &[T]) = ptr.split_at(d);
         for chunk in o.chunks(d) {
             dd[j] = {
-                let mut ed: f32 = 0.0;
-                for _d in 0..d {
-                    ed += (v[_d] - chunk[_d]) * (v[_d] - chunk[_d])
-                }
-                ed
+                v.iter()
+                    .zip(chunk.iter())
+                    .map(|(v, c)| (*v - *c) * (*v - *c))
+                    .sum()
             };
             dd[(n * j) % (n * n - 1)] = dd[j];
             j += 1;
@@ -470,9 +507,12 @@ pub fn compute_squared_euclidean_distance(x: &[f32], n: usize, d: usize, dd: &mu
 }
 
 /// Makes data zero-mean.
-pub fn zero_mean(x: &mut [f32], n: usize, d: usize) {
+pub fn zero_mean<T>(x: &mut [T], n: usize, d: usize)
+where
+    T: Float + NumCast + std::ops::AddAssign + std::ops::SubAssign + std::ops::DivAssign,
+{
     // Compute data mean
-    let mut mean: Vec<f32> = vec![0.0; d];
+    let mut mean: Vec<T> = vec![T::zero(); d];
     let mut n_d: usize = 0;
     for _n in 0..n {
         for _d in 0..d {
@@ -480,8 +520,8 @@ pub fn zero_mean(x: &mut [f32], n: usize, d: usize) {
         }
         n_d += d;
     }
-    for _d in 0..d {
-        mean[_d] /= n as f32;
+    for el in &mut mean[..] {
+        *el /= T::from(n).unwrap();
     }
 
     // Subtract data mean
