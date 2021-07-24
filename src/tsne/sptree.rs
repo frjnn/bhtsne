@@ -189,74 +189,76 @@ where
     ///
     /// `new_index` - index of a point.
     fn insert(&mut self, new_index: usize) -> bool {
-        let mut stack: Vec<&mut SPTree<T>> = vec![self];
-        let mut inserted: bool = false;
+        let point_bound_l: usize = new_index * self.dimension;
+        let point_bound_r: usize = point_bound_l + self.dimension;
 
-        while let Some(tree) = stack.pop() {
-            if inserted {
-                break;
+        // Ignore objects which do not belong in this quad tree.
+        if !self
+            .boundary
+            .contains_point(&self.data[point_bound_l..point_bound_r])
+        {
+            false
+        } else {
+            // Online update of cumulative size and center-of-mass.
+            self.cum_size += 1;
+
+            let mult1: T = T::from(self.cum_size - 1).unwrap() / T::from(self.cum_size).unwrap();
+            let mult2: T = T::one() / T::from(self.cum_size).unwrap();
+
+            for d in 0..self.dimension {
+                self.center_of_mass[d] *= mult1;
+            }
+
+            for d in 0..self.dimension {
+                self.center_of_mass[d] += mult2 * self.data[point_bound_l..point_bound_r][d];
+            }
+
+            // If there is space in this quad tree and it is a leaf, add the object here.
+            if self.is_leaf && self.size < 1 {
+                self.index[0] = new_index;
+                self.size += 1;
+                true
             } else {
-                let point_bound_l: usize = new_index * tree.dimension;
-                let point_bound_r: usize = point_bound_l + tree.dimension;
+                // Don't add duplicates for now (this is not very nice).
+                let mut any_duplicate: bool = false;
 
-                // Ignore objects which do not belong in this quad tree.
-                if tree
-                    .boundary
-                    .contains_point(&tree.data[point_bound_l..point_bound_r])
-                {
-                    // Online update of cumulative size and center-of-mass.
-                    tree.cum_size += 1;
-
-                    let mult1: T =
-                        T::from(tree.cum_size - 1).unwrap() / T::from(tree.cum_size).unwrap();
-                    let mult2: T = T::one() / T::from(tree.cum_size).unwrap();
-
-                    for d in 0..tree.dimension {
-                        tree.center_of_mass[d] *= mult1;
-                    }
-                    for d in 0..tree.dimension {
-                        tree.center_of_mass[d] +=
-                            mult2 * tree.data[point_bound_l..point_bound_r][d];
-                    }
-
-                    // If there is space in this quad tree and it is a leaf, add the object here.
-                    if tree.is_leaf && tree.size < 1 {
-                        tree.index[0] = new_index;
-                        tree.size += 1;
-                        inserted = true;
-                    } else {
-                        // Don't add duplicates for now (this is not very nice).
-                        let mut any_duplicate: bool = false;
-
-                        for n in 0..tree.size {
-                            let mut duplicate: bool = true;
-                            for d in 0..tree.dimension {
-                                if tree.data[point_bound_l..point_bound_r][d]
-                                    != tree.data[tree.index[n] * tree.dimension
-                                        ..tree.index[n] * tree.dimension + tree.dimension][d]
-                                {
-                                    duplicate = false;
-                                    break;
-                                }
-                            }
-                            any_duplicate |= duplicate;
+                for n in 0..self.size {
+                    let mut duplicate: bool = true;
+                    for d in 0..self.dimension {
+                        if self.data[point_bound_l..point_bound_r][d]
+                            != self.data[self.index[n] * self.dimension
+                                ..self.index[n] * self.dimension + self.dimension][d]
+                        {
+                            duplicate = false;
+                            break;
                         }
+                    }
+                    any_duplicate |= duplicate;
+                }
 
-                        if any_duplicate {
+                if any_duplicate {
+                    true
+                } else {
+                    // Otherwise, we need to subdivide the current cell.
+                    if self.is_leaf {
+                        self.subdivide();
+                    }
+
+                    let mut inserted: bool = false;
+
+                    // Find out where the point can be inserted.
+                    for i in 0..self.no_children {
+                        if self.children[i].insert(new_index) {
                             inserted = true;
-                        } else {
-                            // Otherwise, we need to subdivide the current cell.
-                            if tree.is_leaf {
-                                tree.subdivide();
+                            if inserted {
+                                break;
                             }
-                            // Find out where the point can be inserted.
-                            stack.extend(tree.children.iter_mut())
                         }
                     }
+                    inserted
                 }
             }
         }
-        inserted
     }
 
     /// Create four children which fully divide this cell into four quads of equal area.
@@ -355,50 +357,48 @@ where
         neg_f: &mut [T],
         sum_q: &mut T,
     ) {
-        let mut stack: Vec<&mut SPTree<T>> = vec![self];
+        // Make sure that we spend no time on empty nodes or self-interactions.
+        if self.cum_size == 0 || (self.is_leaf && self.size == 1 && self.index[0] == point_index) {
+            return;
+        }
 
-        while let Some(tree) = stack.pop() {
-            // Make sure that we spend no time on empty nodes or self-interactions.
-            if tree.cum_size != 0
-                && !(tree.is_leaf && tree.size == 1 && tree.index[0] == point_index)
-            {
-                // Compute distance between point and center-of-mass.
-                let mut distance: T = T::zero();
-                let ind: usize = point_index * tree.dimension;
+        // Compute distance between point and center-of-mass.
+        let mut distance: T = T::zero();
+        let ind: usize = point_index * self.dimension;
 
-                for d in 0..tree.dimension {
-                    tree.buff[d] = tree.data[ind + d] - tree.center_of_mass[d];
-                }
-                for d in 0..tree.dimension {
-                    distance += tree.buff[d] * tree.buff[d];
-                }
+        for d in 0..self.dimension {
+            self.buff[d] = self.data[ind + d] - self.center_of_mass[d];
+        }
+        for d in 0..self.dimension {
+            distance += self.buff[d] * self.buff[d];
+        }
 
-                // Check whether we can use this node as a summary.
-                let mut max_width: T = T::zero();
-                let mut cur_width: T;
-                for d in 0..tree.dimension {
-                    cur_width = tree.boundary.width[d];
-                    max_width = if max_width > cur_width {
-                        max_width
-                    } else {
-                        cur_width
-                    }
-                }
+        // Check whether we can use this node as a summary.
+        let mut max_width: T = T::zero();
+        let mut cur_width: T;
+        for d in 0..self.dimension {
+            cur_width = self.boundary.width[d];
+            max_width = if max_width > cur_width {
+                max_width
+            } else {
+                cur_width
+            }
+        }
 
-                if tree.is_leaf || max_width / distance.sqrt() < theta {
-                    // Compute and add tsne force between point and current node.
-                    distance = T::one() / (T::one() + distance);
-                    let mut mult: T = T::from(tree.cum_size).unwrap() * distance;
-                    *sum_q += mult;
-                    mult *= distance;
+        if self.is_leaf || max_width / distance.sqrt() < theta {
+            // Compute and add tsne force between point and current node.
+            distance = T::one() / (T::one() + distance);
+            let mut mult: T = T::from(self.cum_size).unwrap() * distance;
+            *sum_q += mult;
+            mult *= distance;
 
-                    for (i, el) in neg_f.iter_mut().enumerate() {
-                        *el += mult * tree.buff[i];
-                    }
-                } else {
-                    // Iteratively apply Barnes-Hut algorithm.
-                    stack.extend(tree.children.iter_mut())
-                }
+            for (i, el) in neg_f.iter_mut().enumerate() {
+                *el += mult * self.buff[i];
+            }
+        } else {
+            // Recursively apply Barnes-Hut to children.
+            for i in 0..self.no_children {
+                self.children[i].compute_non_edge_forces(point_index, theta, neg_f, sum_q)
             }
         }
     }
