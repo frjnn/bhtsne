@@ -1,8 +1,8 @@
 //! # bhtsne
 //!
-//! `bhtsne` contains the implementations of the
-//! vanilla version of t-SNE and the Barnes-Hut optimization.
-//! 
+//! `bhtsne` contains the implementations of both the
+//! vanilla version of the t-SNE algorithm and the Barnes-Hut accelerated version.
+//!
 //! At the moment the only supported metric is the **euclidean distance**.
 //!
 //!
@@ -11,31 +11,34 @@
 //! ```
 //! use bhtsne;
 //!
-//! // Parameters template.
-//! let n: usize = 150;     // Number of vectors to embed.
-//! let d: usize = 4;       // The dimensionality of the original space.
-//! let theta: f32 = 0.5;   // The parameter used by the Barnes-Hut algorithm. When set to 0.0
-//!                         // the exact t-SNE version is used instead.
+//! const N: usize = 150;         // Number of vectors to embed.
+//! const D: usize = 4;           // The dimensionality of the
+//!                               // original space.
+//! const THETA: f32 = 0.5;       // Parameter used by the Barnes-Hut algorithm.
+//!                               // When set to 0.0 the exact t-SNE version is
+//!                               // used instead.
 //!    
-//! let perplexity = 10.0;     // The perplexity of the conditional distribution.
-//! let max_iter: u64 = 2000;  // The number of fitting iterations.
-//! let no_dims: usize = 2;    // The dimensionality of the embedded space.
+//! const PERPLEXITY: f32 = 10.0; // Perplexity of the conditional distribution.
+//! const MAX_ITER: u64 = 2000;   // Number of fitting iterations.
+//! const NO_DIMS: usize = 2;     // Dimensionality of the embedded space.
 //!
-//! // Loads data the from a csv file skipping the first row,
+//! // Loads the data from a csv file skipping the first row,
 //! // treating it as headers and skipping the 5th column,
 //! // treating it as a class label.
+//! // Do note that you can also use f64s.
 //! let mut data: Vec<f32> = bhtsne::load_csv("iris.csv", true, Some(4));
 //!
-//! // This is the vector for the resulting embedding.
-//! let mut y: Vec<f32> = vec![0.0; n * no_dims];
+//! // The vector where the bi-dimensional embedding
+//! // will be stored.
+//! let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
 //!
 //! // Runs t-SNE.
 //! bhtsne::run(
-//!     &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
+//!     &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, THETA, false, MAX_ITER, 250, 250,
 //! );
 //!
 //! // Writes the embedding to a csv file.
-//! bhtsne::write_csv("iris_embedding.csv", y, no_dims);
+//! bhtsne::write_csv("iris_embedding.csv", y, NO_DIMS);
 //! ```
 mod tsne;
 pub(crate) use num_traits::{cast::AsPrimitive, cast::NumCast, Float};
@@ -48,6 +51,7 @@ use std::fs::File;
 /// Performs t-SNE.
 ///
 /// # Arguments
+///
 /// * `x` - `&mut [T]` containing the data to embed. `T` must implement `num_traits::Float`.
 ///
 /// * `n`- `usize` that represents the number of `d`-dimensional points in `x`.
@@ -328,12 +332,14 @@ where
         Ok(writer) => writer,
         Err(e) => panic!("error: during the opening of the file : {}", e),
     };
+
     // String-ify the embedding.
     let to_write: Vec<String> = embedding
         .iter()
         .map(|el| el.to_string())
         .collect::<Vec<String>>();
-    // Write headers if we can.
+
+    // Write headers.
     match dims {
         2 => match wtr.write_record(&["x", "y"]) {
             Ok(_) => (),
@@ -361,58 +367,37 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    const N: usize = 150;
+    const D: usize = 4;
+    const THETA: f32 = 0.5;
+    const PERPLEXITY: f32 = 10.;
+    const MAX_ITER: u64 = 2_000;
+    const NO_DIMS: usize = 2;
+
     #[test]
     #[cfg(not(tarpaulin_include))]
-    fn test_run() {
-        let n = 150;
-        let d = 4;
-        let theta = 0.5;
-        let perplexity = 1.0;
-        let max_iter = 2000;
-        let no_dims = 2;
-
+    fn vanilla_tsne() {
         let mut data: Vec<f32> = super::load_csv("iris.csv", true, Some(4));
-        let mut y: Vec<f32> = vec![0.0; n * no_dims];
+        let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
 
         super::run(
-            &mut data, n, d, &mut y, no_dims, perplexity, theta, false, max_iter, 250, 250,
+            &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, 0., false, MAX_ITER, 250, 250,
         );
+
+        super::write_csv("iris_embedding_vanilla.csv", y, NO_DIMS);
+    }
+
+    #[test]
+    #[cfg(not(tarpaulin_include))]
+    fn barnes_hut_tsne() {
+        let mut data: Vec<f32> = super::load_csv("iris.csv", true, Some(4));
+        let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
 
         super::run(
-            &mut data, n, d, &mut y, no_dims, perplexity, 0.0, false, max_iter, 250, 250,
+            &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, THETA, false, MAX_ITER, 250, 250,
         );
 
-        let mut data: Vec<f64> = super::load_csv("iris.csv", true, Some(4));
-        let mut y: Vec<f64> = vec![0.0; n * no_dims];
-
-        super::run(
-            &mut data,
-            n,
-            d,
-            &mut y,
-            no_dims,
-            perplexity as f64,
-            theta as f64,
-            false,
-            max_iter,
-            250,
-            250,
-        );
-
-        super::run(
-            &mut data,
-            n,
-            d,
-            &mut y,
-            no_dims,
-            perplexity as f64,
-            0.0,
-            false,
-            max_iter,
-            250,
-            250,
-        );
-
-        super::write_csv("iris_embedding.csv", y, no_dims);
+        super::write_csv("iris_embedding_barnes_hut.csv", y, NO_DIMS);
     }
 }

@@ -357,7 +357,15 @@ pub fn compute_gaussian_perplexity<T>(
                 } else {
                     max_beta = beta;
                     if min_beta == T::max_value() || min_beta == -T::max_value() {
-                        beta /= T::from(2.0).unwrap();
+                        if beta < T::zero() {
+                            beta *= T::from(2.).unwrap();
+                        } else {
+                            if beta <= T::one() {
+                                beta = T::from(-0.5).unwrap()
+                            } else {
+                                beta /= T::from(2.0).unwrap();
+                            }
+                        }
                     } else {
                         beta = (beta + min_beta) / T::from(2.0).unwrap();
                     }
