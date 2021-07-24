@@ -13,11 +13,9 @@ where
 }
 
 /// Datapoint struct.
-#[derive(Clone)]
 pub struct DataPoint<T> {
     pub ind: u64,
     content: T,
-    dims: usize,
 }
 
 impl<'a, T> Measurable<T> for DataPoint<&[T]>
@@ -43,8 +41,8 @@ where
     Self: Measurable<T>,
 {
     /// A simple constructor.
-    pub fn new(ind: u64, content: &'a [T], dims: usize) -> Self {
-        DataPoint { ind, content, dims }
+    pub fn new(ind: u64, content: &'a [T]) -> Self {
+        DataPoint { ind, content }
     }
 
     /// Implements a comparison between `self` and two other `DataPoints`.
@@ -168,6 +166,7 @@ where
         upper: usize,
     ) {
         let mut stack: Vec<VPTreeBuilder<T>> = vec![VPTreeBuilder::new(root, lower, upper)];
+        let mut thread_rng = rand::thread_rng();
 
         while let Some(builder) = stack.pop() {
             let VPTreeBuilder { root, lower, upper } = builder;
@@ -181,7 +180,7 @@ where
                 if upper - lower > 1 {
                     // If we did not arrive at leaf yet choose an arbitrary point
                     // and move it to the start.
-                    let i: usize = rand::thread_rng().gen_range(lower..upper) as usize;
+                    let i: usize = thread_rng.gen_range(lower..upper) as usize;
                     items.swap(lower, i);
 
                     let to_cmp = items[lower];
@@ -312,8 +311,7 @@ where
         results.clear();
         distances.clear();
         // Gather final results.
-        while !heap.is_empty() {
-            let el: HeapItem<T> = heap.pop().unwrap();
+        while let Some(el) = heap.pop() {
             results.push(self.items[el.index].ind);
             distances.push(el.dist);
         }

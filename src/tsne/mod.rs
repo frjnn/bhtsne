@@ -304,7 +304,7 @@ pub fn compute_gaussian_perplexity<T>(
     // Build ball tree on data set.
     let mut items: Vec<DataPoint<&[T]>> = Vec::new();
     for (index, chunk) in x.chunks_exact(d).enumerate() {
-        items.push(DataPoint::new(index as u64, chunk, d));
+        items.push(DataPoint::new(index as u64, chunk));
     }
     let mut slice_of_ref: Vec<&DataPoint<&[T]>> = items.iter().collect::<Vec<&DataPoint<&[T]>>>();
     let mut tree: VPTree<T> = VPTree::new(&mut slice_of_ref);
