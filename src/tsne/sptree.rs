@@ -1,28 +1,26 @@
-use super::super::{Float, NumCast};
-
+use super::Aligned;
+use num_traits::{Float, NumCast};
+use std::{
+    fmt::{Debug, Display},
+    iter::Sum,
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign},
+};
 /// A cell for the SPTree.
-struct Cell<T>
-where
-    T: Float,
-{
-    dim: usize,
+struct SPTreeCell<T: Float + Debug + Display + Send + Sync> {
     corner: Vec<T>,
     width: Vec<T>,
 }
 
-impl<T> Cell<T>
-where
-    T: Float,
-{
+impl<T: Float + Debug + Display + Send + Sync> SPTreeCell<T> {
     /// Constructs a cell.
     ///
     /// # Arguments
     ///
-    /// * `dim` - dimensions of a point.
     /// * `corner` - corner of the cell.
+    ///
     /// * `width` - width of the cell.
-    fn new(dim: usize, corner: Vec<T>, width: Vec<T>) -> Self {
-        Cell { dim, corner, width }
+    fn new(corner: Vec<T>, width: Vec<T>) -> Self {
+        Self { corner, width }
     }
 
     /// Checks whether a point lies in a cell.
@@ -30,232 +28,200 @@ where
     /// # Arguments
     ///
     /// `point` - a point.
-    fn contains_point(&self, point: &[T]) -> bool {
-        let mut res: bool = false;
-        for (i, el) in point.iter().enumerate() {
-            if self.corner[i] - self.width[i] > *el {
-                break;
-            }
-            if self.corner[i] + self.width[i] < *el {
-                break;
-            }
-            if i == self.dim - 1 {
-                res = true;
-            }
-        }
-        res
+    fn contains_point(&self, point: &[Aligned<T>]) -> bool {
+        debug_assert_eq!(point.len(), self.corner.len());
+        debug_assert_eq!(point.len(), self.width.len());
+
+        // All the point components lie inside the cell.
+        !point
+            .iter()
+            .zip(self.corner.iter())
+            .zip(self.width.iter())
+            .any(|((&p, &c), &w)| c - w > p.0 || c + w < p.0) // Asserts that the point fully lies inside the cell.
     }
 }
 
 /// An SPTree.
 pub struct SPTree<'a, T>
 where
-    T: Float,
+    T: Float
+        + NumCast
+        + AddAssign
+        + MulAssign
+        + DivAssign
+        + Add
+        + Mul
+        + Div
+        + Send
+        + Sync
+        + Display
+        + Debug
+        + Sum,
 {
-    // A buffer we use when doing force computations.
-    buff: Vec<T>,
-    // Properties of this node in the tree
     dimension: usize,
     is_leaf: bool,
-    size: usize,
-    cum_size: i64,
-    // Axis-aligned bounding box stored as a
-    // center with half-dimensions to represent
-    // the boundaries of this quad tree.
-    boundary: Cell<T>,
-    // Indices in this space-partitioning tree node,
-    // corresponding center-of-mass, and list of all children.
-    data: &'a [T],
+    cumulative_size: i64,
+    boundary: SPTreeCell<T>,
+    data: &'a [Aligned<T>],
     center_of_mass: Vec<T>,
-    index: [usize; 1],
-    // Children.
+    index: Option<usize>,
     children: Vec<SPTree<'a, T>>,
-    no_children: usize,
+    n_children: usize,
 }
 
 impl<'a, T> SPTree<'a, T>
 where
     T: Float
         + NumCast
-        + std::ops::AddAssign
-        + std::ops::MulAssign
-        + std::ops::DivAssign
-        + std::ops::Add
-        + std::ops::Mul
-        + std::ops::Div,
+        + AddAssign
+        + MulAssign
+        + DivAssign
+        + Add
+        + Mul
+        + Div
+        + Send
+        + Sync
+        + Display
+        + Sum
+        + Debug,
 {
     /// The constructor for SPTree, builds the tree too.
     ///
     /// # Arguments
     ///
-    /// * `dim` - dimensions of a point.
-    /// * `inp_data` - data to build the tree from.
-    /// * `num_points` - number of points in `inp_data`.
-    pub fn new(dim: usize, inp_data: &'a [T], num_points: usize) -> Self {
-        // Compute mean, width, and height of current
-        // map i.e. boundaries of SPTree.
-        let mut n_d: usize = 0;
-
-        let mut mean_y: Vec<T> = vec![T::zero(); dim];
-        let mut min_y: Vec<T> = vec![T::max_value(); dim];
-        let mut max_y: Vec<T> = vec![-T::max_value(); dim];
-
-        for n in 0..num_points {
-            for d in 0..dim {
-                mean_y[d] += inp_data[n * dim + d];
-
-                if inp_data[n_d + d] < min_y[d] {
-                    min_y[d] = inp_data[n_d + d];
-                }
-
-                if inp_data[n_d + d] > max_y[d] {
-                    max_y[d] = inp_data[n_d + d];
-                }
-            }
-            n_d += dim;
-        }
-        for el in &mut mean_y[..] {
-            *el /= T::from(num_points).unwrap();
-        }
-
-        // Construct SPTree.
-        let mut inp_width: Vec<T> = vec![T::zero(); dim];
-
-        for d in 0..dim {
-            let max_mean = max_y[d] - mean_y[d];
-            let mean_min = mean_y[d] - min_y[d];
-
-            inp_width[d] = if max_mean >= mean_min {
-                max_mean + T::from(1e-5).unwrap()
-            } else {
-                mean_min + T::from(1e-5).unwrap()
-            };
-        }
-
-        let mut empty_tree: SPTree<T> = SPTree::_new(dim, inp_data, mean_y, inp_width);
-        empty_tree.fill(num_points);
-        empty_tree
-    }
-
-    /// Auxiliary function: construct SPTree with particular size, build the tree too!
+    /// * `dimension` - dimensions of a point.
     ///
-    /// # Arguments
+    /// * `data` - data to build the tree from.
     ///
-    /// * `inp_dim` - dimensions of a point.
-    /// * `inp_data` - data to build the tree from.
-    /// * `inp_corner` - a corner for a cell.
-    /// * `inp_width` - cell's width.
-    fn _new(inp_dim: usize, inp_data: &'a [T], inp_corner: Vec<T>, inp_width: Vec<T>) -> Self {
-        let mut _no_children: usize = 2;
+    /// * `n_samples` - number of points in `inp_data`.
+    pub(crate) fn new(dimension: &usize, data: &'a [Aligned<T>], n_samples: &usize) -> Self {
+        // Mean for each dimension.
+        let mut mean: Vec<T> = vec![T::zero(); *dimension];
+        // Min for each dimension.
+        let mut min: Vec<T> = vec![T::max_value(); *dimension];
+        // Max for each dimension.
+        let mut max: Vec<T> = vec![-T::max_value(); *dimension];
+        // Compute the boundaries of SPTree.
+        data.chunks(*dimension).for_each(|sample| {
+            sample
+                .iter()
+                .zip(mean.iter_mut())
+                .zip(min.iter_mut())
+                .zip(max.iter_mut())
+                .for_each(|(((s, mean_d), min_d), max_d)| {
+                    *mean_d += s.0;
+                    *min_d = min_d.min(s.0);
+                    *max_d = max_d.max(s.0);
+                })
+        });
 
-        for _ in 1..inp_dim {
-            _no_children *= 2;
-        }
+        mean.iter_mut()
+            .for_each(|el| *el /= T::from(*n_samples).unwrap());
 
-        let _boundary: Cell<T> = Cell::new(inp_dim, inp_corner, inp_width);
-        let _children: Vec<SPTree<T>> = Vec::new();
-        let _center_of_mass: Vec<T> = vec![T::zero(); inp_dim];
-        let _buff: Vec<T> = vec![T::zero(); inp_dim];
-        SPTree {
-            buff: _buff,
-            children: _children,
-            center_of_mass: _center_of_mass,
-            boundary: _boundary,
-            size: 0,
-            cum_size: 0,
-            is_leaf: true,
-            dimension: inp_dim,
-            no_children: _no_children,
-            index: [0],
-            data: inp_data,
-        }
+        // Build SPTree.
+        let mut width: Vec<T> = vec![T::zero(); *dimension];
+        width
+            .iter_mut()
+            .zip(mean.iter())
+            .zip(min.iter())
+            .zip(max.iter())
+            .for_each(|(((w, mean_d), min_d), max_d)| {
+                *w = (*max_d - *mean_d).max(*mean_d - *min_d) + T::min_positive_value();
+            });
+
+        let mut tree = SPTree::new_empty(*dimension, data, mean, width);
+        tree.fill(*n_samples);
+        tree
     }
 
     /// Constructs an empty tree.
     ///
     /// # Arguments
     ///
-    /// * `inp_dim` - dimensions of a point.
-    /// * `inp_data` - data to build the tree from.
-    /// * `inp_corner` - a corner for a cell.
-    /// * `inp_width` - cell's width.
-    fn new_empty(inp_dim: usize, inp_data: &'a [T], inp_corner: Vec<T>, inp_width: Vec<T>) -> Self {
-        SPTree::_new(inp_dim, inp_data, inp_corner, inp_width)
+    /// * `dimension` - dimensions of a point.
+    ///
+    /// * `data` - data to build the tree from.
+    ///
+    /// * `corner` - a corner for a cell.
+    ///
+    /// * `width` - cell's width.
+    fn new_empty(dimension: usize, data: &'a [Aligned<T>], corner: Vec<T>, width: Vec<T>) -> Self {
+        let n_children = (2_i32).pow(dimension as u32) as usize;
+        let boundary = SPTreeCell::new(corner, width);
+        let children = Vec::new();
+        let center_of_mass = vec![T::zero(); dimension];
+
+        SPTree {
+            children,
+            center_of_mass,
+            boundary,
+            cumulative_size: 0,
+            is_leaf: true,
+            dimension,
+            n_children,
+            index: None,
+            data,
+        }
     }
 
     /// Inserts a point into the SPTree.
     ///
     /// # Arguments
     ///
-    /// `new_index` - index of a point.
-    fn insert(&mut self, new_index: usize) -> bool {
-        let point_bound_l: usize = new_index * self.dimension;
-        let point_bound_r: usize = point_bound_l + self.dimension;
+    /// `index` - index of the point inside `data`.
+    fn insert(&mut self, index: usize) -> bool {
+        // Point to insert as a slice of data.
+        let point = &self.data[index * self.dimension..(index + 1) * self.dimension];
 
         // Ignore objects which do not belong in this quad tree.
-        if !self
-            .boundary
-            .contains_point(&self.data[point_bound_l..point_bound_r])
-        {
+        if !self.boundary.contains_point(point) {
             false
         } else {
             // Online update of cumulative size and center-of-mass.
-            self.cum_size += 1;
+            self.cumulative_size += 1;
+            // Update center of mass.
+            let m1: T =
+                T::from(self.cumulative_size - 1).unwrap() / T::from(self.cumulative_size).unwrap();
+            let m2: T = T::one() / T::from(self.cumulative_size).unwrap();
 
-            let mult1: T = T::from(self.cum_size - 1).unwrap() / T::from(self.cum_size).unwrap();
-            let mult2: T = T::one() / T::from(self.cum_size).unwrap();
+            debug_assert_eq!(self.center_of_mass.len(), point.len(),);
 
-            for d in 0..self.dimension {
-                self.center_of_mass[d] *= mult1;
-            }
-
-            for d in 0..self.dimension {
-                self.center_of_mass[d] += mult2 * self.data[point_bound_l..point_bound_r][d];
-            }
+            self.center_of_mass
+                .iter_mut()
+                .zip(point.iter())
+                .for_each(|(cm, p)| {
+                    *cm *= m1;
+                    *cm += m2 * p.0;
+                });
 
             // If there is space in this quad tree and it is a leaf, add the object here.
-            if self.is_leaf && self.size < 1 {
-                self.index[0] = new_index;
-                self.size += 1;
+            if self.is_leaf && self.index.is_none() {
+                self.index = Some(index);
                 true
             } else {
-                // Don't add duplicates for now (this is not very nice).
-                let mut any_duplicate: bool = false;
-
-                for n in 0..self.size {
-                    let mut duplicate: bool = true;
-                    for d in 0..self.dimension {
-                        if self.data[point_bound_l..point_bound_r][d]
-                            != self.data[self.index[n] * self.dimension
-                                ..self.index[n] * self.dimension + self.dimension][d]
-                        {
-                            duplicate = false;
-                            break;
-                        }
-                    }
-                    any_duplicate |= duplicate;
-                }
-
-                if any_duplicate {
+                // If there's another point checks that the two points are different. Don't add
+                // duplicates for now.
+                let is_duplicate: bool = if let Some(present) = self.index {
+                    !point
+                        .iter()
+                        .zip(
+                            self.data[present * self.dimension..(present + 1) * self.dimension]
+                                .iter(),
+                        )
+                        .any(|(pa, pb)| (pa.0 - pb.0).abs() >= T::min_positive_value())
+                } else {
+                    false
+                };
+                // The point is already in the tree.
+                if is_duplicate {
                     true
                 } else {
                     // Otherwise, we need to subdivide the current cell.
                     if self.is_leaf {
                         self.subdivide();
                     }
-
-                    let mut inserted: bool = false;
-
-                    // Find out where the point can be inserted.
-                    for i in 0..self.no_children {
-                        if self.children[i].insert(new_index) {
-                            inserted = true;
-                            if inserted {
-                                break;
-                            }
-                        }
-                    }
-                    inserted
+                    // Insert point in some children.
+                    self.children.iter_mut().any(|child| child.insert(index))
                 }
             }
         }
@@ -263,23 +229,28 @@ where
 
     /// Create four children which fully divide this cell into four quads of equal area.
     fn subdivide(&mut self) {
-        // Create new children.
-        for i in 0..self.no_children {
-            let mut div: usize = 1;
+        // Creates new children.
+        for i in 0..self.n_children {
+            let mut den: usize = 1;
             let mut new_corner: Vec<T> = vec![T::zero(); self.dimension];
             let mut new_width: Vec<T> = vec![T::zero(); self.dimension];
 
-            for d in 0..self.dimension {
-                new_width[d] = T::from(0.5).unwrap() * self.boundary.width[d];
-                if (i / div) % 2 == 1 {
-                    new_corner[d] =
-                        self.boundary.corner[d] - T::from(0.5).unwrap() * self.boundary.width[d];
-                } else {
-                    new_corner[d] =
-                        self.boundary.corner[d] + T::from(0.5).unwrap() * self.boundary.width[d];
-                }
-                div *= 2;
-            }
+            // Computes new corner and new width.
+            new_width
+                .iter_mut()
+                .zip(new_corner.iter_mut())
+                .zip(self.boundary.width.iter())
+                .zip(self.boundary.corner.iter())
+                .for_each(|(((nw, nc), bw), bc)| {
+                    *nw = T::from(0.5).unwrap() * *bw;
+                    if (i / den) % 2 == 1 {
+                        *nc = *bc - T::from(0.5).unwrap() * *bw;
+                    } else {
+                        *nc = *bc + T::from(0.5).unwrap() * *bw;
+                    }
+                    den *= 2;
+                });
+            // Creates a new child.
             self.children.push(SPTree::new_empty(
                 self.dimension,
                 self.data,
@@ -288,18 +259,12 @@ where
             ));
         }
 
-        // Move existing points to correct children.
-        for i in 0..self.size {
-            let mut success: bool = false;
-            for j in 0..self.no_children {
-                if !success {
-                    success = self.children[j].insert(self.index[i]);
-                }
-            }
-            self.index[i] = 0;
+        // Move existing points, if any, to correct children.
+        if let Some(index) = self.index {
+            self.children.iter_mut().any(|child| child.insert(index));
+            // Empty parent node.
+            self.index = None;
         }
-        // Empty parent node.
-        self.size = 0;
         self.is_leaf = false;
     }
 
@@ -307,38 +272,28 @@ where
     ///
     /// # Arguments
     ///
-    /// `data_n` - number of points.
-    fn fill(&mut self, data_n: usize) {
-        (0..data_n).for_each(|n| {
-            self.insert(n);
+    /// `n_samples` - number of points.
+    fn fill(&mut self, n_samples: usize) {
+        (0..n_samples).for_each(|index| {
+            self.insert(index);
         })
     }
 
     /// Checks whether the tree is correct
-    #[allow(dead_code)]
-    #[cfg(not(tarpaulin_include))]
-    pub fn is_correct(&self) -> bool {
-        let mut ok: bool = true;
-
-        for i in 0..self.size {
-            let point: &[T] = &self.data[self.index[i] * self.dimension..];
-            if !self.boundary.contains_point(point) {
-                ok = false;
-            }
-        }
-
-        if ok {
-            if !self.is_leaf {
-                let mut correct: bool = true;
-                for i in 0..self.no_children {
-                    correct = correct && self.children[i].is_correct();
-                }
-                correct
-            } else {
-                ok
-            }
+    pub(crate) fn is_correct(&self) -> bool {
+        // Empty nodes are correct.
+        let is_correct = if let Some(index) = self.index {
+            self.boundary
+                .contains_point(&self.data[index * self.dimension..(index + 1) * self.dimension])
         } else {
-            ok
+            true
+        };
+
+        if !self.is_leaf && is_correct {
+            // There are no children who are not correct.
+            !self.children.iter().any(|child| !child.is_correct())
+        } else {
+            is_correct
         }
     }
 
@@ -346,60 +301,73 @@ where
     ///
     /// # Arguments
     ///
-    /// * `point_index` - index of a point.
+    /// * `index` - index of a point.
+    ///
     /// * `theta` - parameter specific to Barnes-Hut algorithm.
-    /// * `neg_f` - negative forces.
-    /// * `sum_q` - cumulative sum for the multiplicative factors.
-    pub fn compute_non_edge_forces(
-        &mut self,
-        point_index: usize,
-        theta: T,
-        neg_f: &mut [T],
-        sum_q: &mut T,
+    ///
+    /// * `negative_forces` - negative forces.
+    ///
+    /// * `q_sum` - cumulative sum for the multiplicative factors.
+    pub(crate) fn compute_non_edge_forces(
+        &self,
+        index: usize,
+        theta: &T,
+        negative_forces_row: &mut [Aligned<T>],
+        forces_buffer: &mut [Aligned<T>],
+        q_sum: &mut Aligned<T>,
     ) {
-        // Make sure that we spend no time on empty nodes or self-interactions.
-        if self.cum_size == 0 || (self.is_leaf && self.size == 1 && self.index[0] == point_index) {
+        // Make sure that  no time is spent on empty nodes or self-interactions.
+        if self.cumulative_size == 0
+            || (self.is_leaf && self.index.is_some() && self.index.unwrap() == index)
+        {
             return;
         }
 
-        // Compute distance between point and center-of-mass.
-        let mut distance: T = T::zero();
-        let ind: usize = point_index * self.dimension;
+        debug_assert_eq!(negative_forces_row.len(), forces_buffer.len());
 
-        for d in 0..self.dimension {
-            self.buff[d] = self.data[ind + d] - self.center_of_mass[d];
-        }
-        for d in 0..self.dimension {
-            distance += self.buff[d] * self.buff[d];
-        }
+        // Retrieves point slice.
+        let point: &[Aligned<T>] = &self.data[index * self.dimension..(index + 1) * self.dimension];
+
+        // Compute distance between point and center-of-mass.
+        forces_buffer
+            .iter_mut()
+            .zip(point.iter())
+            .zip(self.center_of_mass.iter())
+            .for_each(|((fb, p), cm)| fb.0 = p.0 - *cm);
+
+        let mut distance: T = forces_buffer.iter().map(|b| b.0.powi(2)).sum();
 
         // Check whether we can use this node as a summary.
-        let mut max_width: T = T::zero();
-        let mut cur_width: T;
-        for d in 0..self.dimension {
-            cur_width = self.boundary.width[d];
-            max_width = if max_width > cur_width {
-                max_width
-            } else {
-                cur_width
-            }
-        }
+        let max_width =
+            self.boundary
+                .width
+                .iter()
+                .fold(T::zero(), |acc, bw| if *bw >= acc { *bw } else { acc });
 
-        if self.is_leaf || max_width / distance.sqrt() < theta {
-            // Compute and add tsne force between point and current node.
+        if self.is_leaf || (max_width / distance.sqrt() < *theta) {
+            // Compute and add tSNE forces between point and current node.
             distance = T::one() / (T::one() + distance);
-            let mut mult: T = T::from(self.cum_size).unwrap() * distance;
-            *sum_q += mult;
-            mult *= distance;
 
-            for (i, el) in neg_f.iter_mut().enumerate() {
-                *el += mult * self.buff[i];
-            }
+            let mut m: T = T::from(self.cumulative_size).unwrap() * distance;
+
+            q_sum.0 += m;
+            m *= distance;
+
+            negative_forces_row
+                .iter_mut()
+                .zip(forces_buffer.iter())
+                .for_each(|(nf, b)| nf.0 += m * b.0);
         } else {
             // Recursively apply Barnes-Hut to children.
-            for i in 0..self.no_children {
-                self.children[i].compute_non_edge_forces(point_index, theta, neg_f, sum_q)
-            }
+            self.children.iter().for_each(|child| {
+                child.compute_non_edge_forces(
+                    index,
+                    theta,
+                    negative_forces_row,
+                    forces_buffer,
+                    q_sum,
+                )
+            });
         }
     }
 
@@ -407,43 +375,54 @@ where
     ///
     /// # Arguments
     ///
-    /// * `row_p` - row indices.
-    /// * `col_p` - column indices.
-    /// * `val_p` - P matrix entries.
-    /// * `num` - number of points.
-    /// * `pos_f` - positive forces.
-    pub fn compute_edge_forces(
-        &mut self,
-        row_p: &mut [usize],
-        col_p: &mut [usize],
-        val_p: &mut [T],
-        num: usize,
-        pos_f: &mut [T],
+    /// * `index` = index of a sample.
+    ///
+    /// * `sample` - sample.
+    ///
+    /// * `p_rows` - row indices.
+    ///
+    /// * `p_columns` - column indices.
+    ///
+    /// * `p_values` - P matrix entries.
+    ///
+    /// * `n_samples` - number of points.
+    ///
+    /// * `positive_forces_row` - positive forces.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compute_edge_forces(
+        &self,
+        index: usize,
+        sample: &[Aligned<T>],
+        p_rows: &[usize],
+        p_columns: &[usize],
+        p_values: &[Aligned<T>],
+        forces_buffer: &mut [Aligned<T>],
+        positive_forces_row: &mut [Aligned<T>],
     ) {
-        // Loop over all edges in the graph.
-        let mut ind1: usize = 0;
-        let mut ind2: usize;
-        let mut distance: T;
+        // Indexes neighbors of sample.
+        // index is the index of the sample.
+        for i in p_rows[index]..p_rows[index + 1] {
+            // Compute pairwise distance and Q-value.
+            let other_sample =
+                &self.data[p_columns[i] * self.dimension..(p_columns[i] + 1) * self.dimension];
 
-        for n in 0..num {
-            for i in row_p[n]..row_p[n + 1] {
-                // Compute pairwise distance and Q-value.
-                distance = T::one();
-                ind2 = col_p[i] * self.dimension;
+            debug_assert_eq!(sample.len(), other_sample.len(),);
+            debug_assert_eq!(forces_buffer.len(), positive_forces_row.len());
 
-                for d in 0..self.dimension {
-                    self.buff[d] = self.data[ind1 + d] - self.data[ind2 + d];
-                }
-                for d in 0..self.dimension {
-                    distance += self.buff[d] * self.buff[d];
-                }
-                distance = val_p[i] / distance;
-                // Sum positive force.
-                for d in 0..self.dimension {
-                    pos_f[ind1 + d] += distance * self.buff[d];
-                }
-            }
-            ind1 += self.dimension;
+            forces_buffer
+                .iter_mut()
+                .zip(sample.iter())
+                .zip(other_sample.iter())
+                .for_each(|((fb, s), os)| fb.0 = s.0 - os.0);
+
+            let mut distance = forces_buffer.iter().map(|fb| fb.0.powi(2)).sum::<T>();
+            distance = p_values[i].0 / (distance + T::one());
+
+            // Sum positive force.
+            positive_forces_row
+                .iter_mut()
+                .zip(forces_buffer.iter())
+                .for_each(|(pfr, fb)| pfr.0 += distance * fb.0);
         }
     }
 }
