@@ -21,7 +21,7 @@ bhtsne = "0.5.0"
 ```
 ### Documentation
 
-The docs are available on [here](https://docs.rs/bhtsne).
+The docs are available [here](https://docs.rs/bhtsne).
 
 ### Example
 
