@@ -1,259 +1,704 @@
 //! # bhtsne
 //!
-//! `bhtsne` contains the implementations of both the
-//! vanilla version of the t-SNE algorithm and the Barnes-Hut accelerated version.
+//! `bhtsne` contains the implementations of both a parallel, exact, version of the t-SNE algorithm
+//! and a parallel, approximate, version leveraging the Barnes-Hut algorithm.
 //!
-//! At the moment the only supported metric is the **euclidean distance**.
+//! The implementation supports custom data types and custom defined metrics. See [`tSNE`] for more
+//! details.
 //!
+//! This crate also includes [`load_csv`], a commodity function to parse data, record by record,
+//! from a csv file.
 //!
 //! # Example
 //!
 //! ```
+//! # use std::error::Error;
 //! use bhtsne;
 //!
 //! const N: usize = 150;         // Number of vectors to embed.
 //! const D: usize = 4;           // The dimensionality of the
 //!                               // original space.
 //! const THETA: f32 = 0.5;       // Parameter used by the Barnes-Hut algorithm.
-//!                               // When set to 0.0 the exact t-SNE version is
-//!                               // used instead.
+//!                               // Small values improve accuracy but increase complexity.
 //!    
 //! const PERPLEXITY: f32 = 10.0; // Perplexity of the conditional distribution.
-//! const MAX_ITER: u64 = 2000;   // Number of fitting iterations.
-//! const NO_DIMS: usize = 2;     // Dimensionality of the embedded space.
+//! const EPOCHS: usize = 2000;   // Number of fitting iterations.
+//! const NO_DIMS: u8 = 2;        // Dimensionality of the embedded space.
 //!
 //! // Loads the data from a csv file skipping the first row,
 //! // treating it as headers and skipping the 5th column,
 //! // treating it as a class label.
-//! // Do note that you can also use f64s.
-//! let mut data: Vec<f32> = bhtsne::load_csv("iris.csv", true, Some(4));
+//! // Do note that you can also switch to f64s for higher precision.
+//! let data: Vec<f32> = bhtsne::load_csv("iris.csv", true, Some(&[4]), |float| {
+//!     float.parse().unwrap()
+//! })?;
+//! let samples: Vec<&[f32]> = data.chunks(D).collect();
 //!
-//! // The vector where the bi-dimensional embedding
-//! // will be stored.
-//! let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
-//!
-//! // Runs t-SNE.
-//! bhtsne::run(
-//!     &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, THETA, false, MAX_ITER, 250, 250,
-//! );
-//!
-//! // Writes the embedding to a csv file.
-//! bhtsne::write_csv("iris_embedding.csv", y, NO_DIMS);
+//! // Executes the Barnes-Hut approximation of the algorithm and writes the embedding to the
+//! // specified csv file.
+//! bhtsne::tSNE::new(&samples)
+//!     .embedding_dim(NO_DIMS)
+//!     .perplexity(PERPLEXITY)
+//!     .epochs(EPOCHS)
+//!     .barnes_hut(THETA, |sample_a, sample_b| {
+//!         sample_a
+//!             .iter()
+//!             .zip(sample_b.iter())
+//!             .map(|(a, b)| (a - b).powi(2))
+//!             .sum::<f32>()
+//!             .sqrt()
+//!     })
+//!     .write_csv("iris_embedding.csv")?;
+//! # Ok::<(), Box<dyn Error>>(())
 //! ```
 mod tsne;
-pub(crate) use num_traits::{cast::AsPrimitive, cast::NumCast, Float};
-use rand_distr::{Distribution, Normal};
-use tsne::*;
 
+#[cfg(test)]
+mod test;
+
+pub(crate) use num_traits::{cast::AsPrimitive, Float};
+use rayon::{
+    iter::{
+        IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
+        ParallelIterator,
+    },
+    slice::{ParallelSlice, ParallelSliceMut},
+};
 #[cfg(feature = "csv")]
-use std::fs::File;
+use std::{error::Error, fs::File};
+use std::{
+    fmt::{Debug, Display},
+    iter::Sum,
+    ops::{AddAssign, DivAssign, MulAssign, SubAssign},
+};
 
-/// Performs t-SNE.
-///
-/// # Arguments
-///
-/// * `x` - `&mut [T]` containing the data to embed. `T` must implement `num_traits::Float`.
-///
-/// * `n`- `usize` that represents the number of `d`-dimensional points in `x`.
-///
-/// * `d` - `usize` that represents the dimension of each point.
-///
-/// * `y` - `&mut [T]` where to store the resultant embedding.
-///
-/// * `no_dims` - `usize` that represents the dimension of the embedded points.
-///
-/// * `perplexity` - `T` representing perplexity value.
-///
-/// * `theta` - `T` representing the theta value. If `theta` is set to `0.0` the __exact__ version of t-SNE will be used,
-/// if set to greater values the __Barnes-Hut__ version will be used instead.
-///
-/// * `skip_random_init` - `bool` stating whether to skip the random initialization of `y`.
-/// In most cases it should be set to `false`.
-///
-/// * `max_iter` -` u64` indicating the maximum number of fitting iterations.
-///
-/// * `stop_lying_iter` - `u64` indicating the number of the iteration after which the P distribution
-/// values become _“true“_.
-///
-/// * `mom_switch_iter` - `u64` indicating the number of the iteration after which the momentum's value is
-/// set to its final value.
-pub fn run<T>(
-    x: &mut [T],
-    n: usize,
-    d: usize,
-    y: &mut [T],
-    no_dims: usize,
-    perplexity: T,
-    theta: T,
-    skip_random_init: bool,
-    max_iter: u64,
-    stop_lying_iter: u64,
-    mom_switch_iter: u64,
-) where
-    T: Float
-        + NumCast
-        + AsPrimitive<usize>
-        + std::fmt::Display
-        + std::ops::AddAssign
-        + std::ops::SubAssign
-        + std::ops::MulAssign
-        + std::ops::DivAssign
-        + std::iter::Sum,
+/// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
+/// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
+#[allow(non_camel_case_types)]
+pub struct tSNE<'data, T, U>
+where
+    T: Send + Sync + Float + Sum + DivAssign + MulAssign + AddAssign + SubAssign,
+    U: Send + Sync,
 {
-    // Determine whether we are using the exact algorithm.
-    if n - 1 < 3 * perplexity.as_() {
-        panic!(
-            "error: perplexity= {} too large for the number of data points.\n",
-            perplexity
+    data: &'data [U],
+    learning_rate: T,
+    epochs: usize,
+    momentum: T,
+    final_momentum: T,
+    momentum_switch_epoch: usize,
+    stop_lying_epoch: usize,
+    embedding_dim: u8,
+    perplexity: T,
+    p_values: Vec<tsne::Aligned<T>>,
+    p_rows: Vec<usize>,
+    p_columns: Vec<usize>,
+    q_values: Vec<tsne::Aligned<T>>,
+    y: Vec<tsne::Aligned<T>>,
+    dy: Vec<tsne::Aligned<T>>,
+    uy: Vec<tsne::Aligned<T>>,
+    gains: Vec<tsne::Aligned<T>>,
+}
+
+impl<'data, T, U> tSNE<'data, T, U>
+where
+    T: Float
+        + Send
+        + Sync
+        + Display
+        + Debug
+        + AsPrimitive<usize>
+        + Sum
+        + DivAssign
+        + AddAssign
+        + MulAssign
+        + SubAssign,
+    U: Send + Sync,
+{
+    /// Creates a new t-SNE instance.
+    ///
+    /// # Arguments
+    ///
+    /// `data` - dataset to execute the t-SNE algorithm on.
+    ///
+    /// Accordingly to the original implementation, the following configuration is provided by
+    /// default:
+    ///
+    /// * `learning_rate = 200`
+    /// * `epochs = 1000`
+    /// * `momentum = 0.5`
+    /// * `final_momentum = 0.8`
+    /// * `stop_lying_epoch = 250`
+    /// * `embedding_dim = 2`
+    /// * `perplexity = 20.0`
+    /// * `random_init = false`
+    ///
+    /// Such parameters can be set to different values with the provided methods.
+    ///
+    /// # Examples
+    ///
+    /// The dataset in input needs to be formed by singular entities. For instance, general vector
+    /// data can be handled in the following way:
+    ///
+    /// ```
+    /// use bhtsne::tSNE;
+    ///
+    /// const N: usize = 1000; // Supposedly 1000 25-dimensional points.
+    /// const D: usize = 25;
+    ///
+    /// let data: Vec<f32> = vec![0.0_f32; N * D];
+    /// let vectors: Vec<&[f32]> = data.chunks(D).collect();
+    ///
+    /// let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&vectors); // Will compute using f32s.
+    /// let mut tsne: tSNE<f64, &[f32]> = tSNE::new(&vectors); // Will compute using f64s.
+    /// ```
+    ///
+    /// One can also use `&str`, [`String`] or custom data types:
+    ///
+    /// ```
+    /// use bhtsne::tSNE;
+    ///
+    /// const N: usize = 1000; // Supposedly 1000 strings.
+    /// let strings: Vec<&str> = vec!["Hello World!"; N];
+    ///
+    /// let mut tsne: tSNE<f32, &str> = tSNE::new(&strings);
+    /// ```
+    pub fn new(data: &'data [U]) -> Self {
+        Self {
+            data,
+            learning_rate: T::from(200.0).unwrap(),
+            epochs: 1000,
+            momentum: T::from(0.5).unwrap(),
+            final_momentum: T::from(0.8).unwrap(),
+            momentum_switch_epoch: 250,
+            stop_lying_epoch: 250,
+            embedding_dim: 2,
+            perplexity: T::from(20.0).unwrap(),
+            p_values: Vec::new(),
+            p_rows: Vec::new(),
+            p_columns: Vec::new(),
+            q_values: Vec::new(),
+            y: Vec::new(),
+            dy: Vec::new(),
+            uy: Vec::new(),
+            gains: Vec::new(),
+        }
+    }
+
+    /// Sets a new learning rate.
+    ///
+    /// # Arguments
+    ///
+    /// `learning_rate` - new value for the learning rate.
+    pub fn learning_rate<'a>(&'a mut self, learning_rate: T) -> &'a mut Self {
+        self.learning_rate = learning_rate;
+        self
+    }
+
+    /// Sets new epochs, i.e the maximum number of fitting iterations.
+    ///
+    /// # Arguments
+    ///
+    /// `epochs` - new value for the epochs.
+    pub fn epochs<'a>(&'a mut self, epochs: usize) -> &'a mut Self {
+        self.epochs = epochs;
+        self
+    }
+
+    /// Sets a new momentum.
+    ///
+    /// # Arguments
+    ///
+    /// `momentum` - new value for the momentum.
+    pub fn momentum<'a>(&'a mut self, momentum: T) -> &'a mut Self {
+        self.momentum = momentum;
+        self
+    }
+
+    /// Sets a new final momentum.
+    ///
+    /// # Arguments
+    ///
+    /// `final_momentum` - new value for the final momentum.
+    pub fn final_momentum<'a>(&'a mut self, final_momentum: T) -> &'a mut Self {
+        self.final_momentum = final_momentum;
+        self
+    }
+
+    /// Sets a new momentum switch epoch, i.e. the epoch after which the algorithm switches to
+    /// `final_momentum` for the map update.
+    ///
+    /// # Arguments
+    ///
+    /// `momentum_switch_epoch` - new value for the momentum switch epoch.
+    pub fn momentum_switch_epoch<'a>(&'a mut self, momentum_switch_epoch: usize) -> &'a mut Self {
+        self.momentum_switch_epoch = momentum_switch_epoch;
+        self
+    }
+
+    /// Sets a new stop lying epoch, i.e. the epoch after which the P distribution values become
+    /// true, as defined in the original implementation. For epochs < `stop_lying_epoch` the values
+    /// of the P distribution are multiplied by a factor equal to `12.0`.
+    ///
+    /// # Arguments
+    ///
+    /// `stop_lying_epoch` - new value for the stop lying epoch.
+    pub fn stop_lying_epoch<'a>(&'a mut self, stop_lying_epoch: usize) -> &'a mut Self {
+        self.stop_lying_epoch = stop_lying_epoch;
+        self
+    }
+
+    /// Sets a new value for the embedding dimension.
+    ///
+    /// # Arguments
+    ///
+    /// `embedding_dim` - new value for the embedding space dimensionality.
+    pub fn embedding_dim<'a>(&'a mut self, embedding_dim: u8) -> &'a mut Self {
+        self.embedding_dim = embedding_dim;
+        self
+    }
+
+    /// Sets a new perplexity value.
+    ///
+    /// # Arguments
+    ///
+    /// `perplexity` - new value for the perplexity. It's used so that the bandwidth of the Gaussian
+    ///  kernels, is set in such a way that the perplexity of each the conditional distribution *Pi*
+    ///  equals a predefined perplexity *u*.
+    ///
+    /// A good value for perplexity lies between 5.0 and 50.0.
+    pub fn perplexity<'a>(&'a mut self, perplexity: T) -> &'a mut Self {
+        self.perplexity = perplexity;
+        self
+    }
+
+    /// Performs a parallel exact version of the t-SNE algorithm. Pairwise distances between samples
+    /// in the input space will be computed accordingly to the supplied function `distance_f`.
+    ///
+    /// # Arguments
+    ///
+    /// `distance_f` - distance function.
+    ///
+    /// **Do note** that such a distance function needs not to be a metric distance, i.e. it is not
+    /// necessary for it so satisfy the triangle inequality. Consequently, the squared euclidean
+    /// distance, and many other, can be used.
+    pub fn exact<'a, F: Fn(&U, &U) -> T + Send + Sync>(
+        &'a mut self,
+        distance_f: F,
+    ) -> &'a mut Self {
+        let data = self.data;
+        let n_samples = self.data.len(); // Number of samples in data.
+
+        // Checks that the supplied perplexity is suitable for the number of samples at hand.
+        tsne::check_perplexity(&self.perplexity, &n_samples);
+
+        let embedding_dim = self.embedding_dim as usize;
+        // NUmber of entries in gradient and gains matrices.
+        let grad_entries = n_samples * embedding_dim;
+        // Number of entries in pairwise measures matrices.
+        let pairwise_entries = n_samples * n_samples;
+
+        // Prepares the buffers.
+        tsne::prepare_buffers(
+            &mut self.y,
+            &mut self.dy,
+            &mut self.uy,
+            &mut self.gains,
+            &grad_entries,
         );
-    }
-    let exact: bool = theta == T::zero();
+        // Prepare distributions matrices.
+        self.p_values.resize(pairwise_entries, T::zero().into()); // P.
+        self.q_values.resize(pairwise_entries, T::zero().into()); // Q.
 
-    // Set learning parameters.
-    let mut momentum: T = T::from(0.5).unwrap();
-    let final_momentum: T = T::from(0.8).unwrap();
-    let eta: T = T::from(200.0).unwrap();
-
-    let mut dy: Vec<T> = vec![T::zero(); n * no_dims];
-    let mut uy: Vec<T> = vec![T::zero(); n * no_dims];
-    let mut gains: Vec<T> = vec![T::one(); n * no_dims];
-
-    // Normalizing input data to prevent numerical problems.
-    zero_mean(x, n, d);
-
-    let mut max_x: T = T::zero();
-    for el in &x[..] {
-        let el_abs = el.abs();
-        if el_abs > max_x {
-            max_x = el_abs;
+        // Alignment prevents false sharing.
+        let mut distances: Vec<tsne::Aligned<T>> = vec![T::zero().into(); pairwise_entries];
+        // Zeroes the diagonal entries. The distances vector is recycled but the elements
+        // corresponding to the diagonal entries of the distance matrix are always kept to 0. and
+        // never written on. This hold as an invariant through all the algorithm.
+        for i in 0..n_samples {
+            distances[i * n_samples + i] = T::zero().into();
         }
-    }
-    for el in &mut x[..] {
-        *el /= max_x;
-    }
 
-    let mut p: Vec<T> = Vec::new();
-    let mut row_p: Vec<usize> = Vec::new();
-    let mut col_p: Vec<usize> = Vec::new();
-    let mut val_p: Vec<T> = Vec::new();
+        // Compute pairwise distances in parallel with the user supplied function.
+        // Only upper triangular entries, excluding the diagonal are computed: flat indexes are
+        // unraveled to pick such entries.
+        tsne::compute_pairwise_distance_matrix(
+            &mut distances,
+            distance_f,
+            |index| &data[*index],
+            &n_samples,
+        );
 
-    if exact {
-        p = vec![T::zero(); n * n];
-        // Compute similarities.
-        compute_fixed_gaussian_perplexity(x, n, d, &mut p, perplexity);
+        // Compute gaussian perplexity in parallel. First, the conditional distribution is computed
+        // for each element. Each row of the P matrix is independent from the others, thus, this
+        // computation is accordingly parallelized.
+        {
+            let perplexity = &self.perplexity;
+            self.p_values
+                .par_chunks_mut(n_samples)
+                .zip(distances.par_chunks(n_samples))
+                .for_each(|(p_values_row, distances_row)| {
+                    tsne::search_beta(p_values_row, distances_row, perplexity);
+                });
+        }
 
-        // Symmetrize input similarities.
-        let mut nn: usize = 0;
-        for _n in 0..n {
-            let mut mn: usize = (_n + 1) * n;
-            for m in (_n + 1)..n {
-                let _p = p[mn + _n];
-                p[nn + m] += _p;
-                p[mn + _n] = p[nn + m];
-                mn += n;
+        // Symmetrize pairwise input similarities. Conditional probabilities must be summed to
+        // obtain the joint P distribution.
+        for i in 0..n_samples {
+            for j in (i + 1)..n_samples {
+                let symmetric = self.p_values[j * n_samples + i].0;
+                self.p_values[i * n_samples + j].0 += symmetric;
+                self.p_values[j * n_samples + i].0 = self.p_values[i * n_samples + j].0;
             }
-            nn += n;
         }
 
-        let mut sum_p: T = T::zero();
-        for el in &p[..] {
-            sum_p += *el;
-        }
-        for el in &mut p[..] {
-            *el /= sum_p;
-        }
-    } else {
-        let k: usize = (T::from(3.0).unwrap() * perplexity).as_();
-        row_p = vec![0; n + 1];
-        col_p = vec![0; n * k];
-        val_p = vec![T::zero(); n * k];
-        // Compute input similarities for approximate algorithm.
-        compute_gaussian_perplexity(x, n, d, &mut row_p, &mut col_p, &mut val_p, perplexity, k);
+        // Normalize P values.
+        tsne::normalize_p_values(&mut self.p_values);
 
-        symmetrize_matrix(&mut row_p, &mut col_p, &mut val_p, n);
+        // Initialize solution randomly.
+        tsne::random_init(&mut self.y);
 
-        let mut sum_p: T = T::zero();
+        // Vector used to store the mean values for each embedding dimension. It's used
+        // to make the solution zero mean.
+        let mut means: Vec<T> = vec![T::zero(); embedding_dim];
 
-        for el in val_p.iter().take(row_p[n]) {
-            sum_p += *el;
-        }
-        for el in val_p.iter_mut().take(row_p[n]) {
-            *el /= sum_p;
-        }
-    }
-
-    // Lie about the P values.
-    if exact {
-        for el in &mut p[..] {
-            *el *= T::from(12.0).unwrap();
-        }
-    } else {
-        for el in val_p.iter_mut().take(row_p[n]) {
-            *el *= T::from(12.0).unwrap();
-        }
-    }
-
-    // Initialize solution randomly.
-    if !skip_random_init {
-        // Generates a Gaussian random number.
-        let n_distr = Normal::new(0.0, 1e-4).unwrap();
-
-        for el in &mut y[..] {
-            *el = T::from(n_distr.sample(&mut rand::thread_rng()) * 0.0001).unwrap();
-        }
-    }
-
-    // Main training loop.
-    for iter in 0..max_iter {
-        // Compute (approximate) gradient.
-        if exact {
-            compute_gradient(&mut p, y, n, no_dims, &mut dy);
-        } else {
-            compute_gradient_approx(
-                &mut row_p, &mut col_p, &mut val_p, y, n, no_dims, &mut dy, theta,
+        // Main fitting loop.
+        for epoch in 0..self.epochs {
+            // Compute pairwise squared euclidean distances between embeddings in parallel.
+            tsne::compute_pairwise_distance_matrix(
+                &mut distances,
+                |ith: &[tsne::Aligned<T>], jth: &[tsne::Aligned<T>]| {
+                    ith.iter()
+                        .zip(jth.iter())
+                        .map(|(i, j)| (i.0 - j.0).powi(2))
+                        .sum()
+                },
+                |index| &self.y[index * embedding_dim..index * embedding_dim + embedding_dim],
+                &n_samples,
             );
-        }
 
-        // Update gains.
-        for (i, el) in gains.iter_mut().enumerate() {
-            *el = if dy[i].signum() != uy[i].signum() {
-                *el + T::from(0.2).unwrap()
-            } else {
-                *el * T::from(0.8).unwrap()
+            // Computes Q.
+            self.q_values
+                .par_iter_mut()
+                .zip(distances.par_iter())
+                .for_each(|(q, d)| q.0 = T::one() / (T::one() + d.0));
+
+            // Computes the exact gradient in parallel.
+            let q_values_sum: T = self.q_values.par_iter().map(|q| q.0).sum();
+
+            // Immutable borrow to self must happen outside of the inner sequential
+            // loop. The outer parallel loop already has a mutable borrow.
+            let y = &self.y;
+            self.dy
+                .par_chunks_mut(embedding_dim)
+                .zip(self.y.par_chunks(embedding_dim))
+                .zip(self.p_values.par_chunks(n_samples))
+                .zip(self.q_values.par_chunks(n_samples))
+                .for_each(
+                    |(((dy_sample, y_sample), p_values_sample), q_values_sample)| {
+                        p_values_sample
+                            .iter()
+                            .zip(q_values_sample.iter())
+                            .zip(y.chunks(embedding_dim))
+                            .for_each(|((p, q), other_sample)| {
+                                let m: T = (p.0 - q.0 / q_values_sum) * q.0;
+                                dy_sample
+                                    .iter_mut()
+                                    .zip(y_sample.iter())
+                                    .zip(other_sample.iter())
+                                    .for_each(|((dy_el, y_el), other_el)| {
+                                        dy_el.0 += (y_el.0 - other_el.0) * m
+                                    });
+                            });
+                    },
+                );
+
+            // Updates the embedding in parallel with gradient descent.
+            tsne::update_solution(
+                &mut self.y,
+                &self.dy,
+                &mut self.uy,
+                &mut self.gains,
+                &self.learning_rate,
+                &self.momentum,
+            );
+            // Zeroes the gradient.
+            self.dy.iter_mut().for_each(|el| el.0 = T::zero());
+
+            // Make solution zero mean.
+            tsne::zero_mean(&mut means, &mut self.y, &n_samples, &embedding_dim);
+
+            // Stop lying about the P-values if the time is right.
+            if epoch == self.stop_lying_epoch {
+                tsne::stop_lying(&mut self.p_values);
+            }
+
+            // Switches momentum if the time is right.
+            if epoch == self.momentum_switch_epoch {
+                self.momentum = self.final_momentum;
             }
         }
-        for el in &mut gains[..] {
-            if *el < T::from(0.01).unwrap() {
-                *el = T::from(0.01).unwrap();
+        // Clears buffers used for fitting.
+        tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+        self
+    }
+
+    /// Performs a parallel Barnes-Hut approximation of the t-SNE algorithm.
+    ///
+    /// # Arguments
+    ///
+    /// * `theta` - determines the accuracy of the approximation. Must be **strictly greater than
+    /// 0.0**. Large values for θ increase the speed of the algorithm but decrease its accuracy.
+    /// For small values of θ it is less probable that a cell in the space partitioning tree will
+    /// be treated as a single point. For θ equal to 0.0 the method degenerates in the exact
+    /// version.
+    ///
+    /// * `metric_f` - metric function.
+    ///
+    ///
+    /// **Do note that** `metric_f` **must be a metric distance**, i.e. it must
+    /// satisfy the [triangle inequality](https://en.wikipedia.org/wiki/Triangle_inequality).
+    pub fn barnes_hut<'a, F: Fn(&U, &U) -> T + Send + Sync>(
+        &'a mut self,
+        theta: T,
+        metric_f: F,
+    ) -> &'a mut Self {
+        // Checks that theta is valid.
+        assert!(
+            theta > T::zero(),
+            "error: theta value must be greater than 0.0. 
+            A value of 0.0 corresponds to using the exact version of the algorithm."
+        );
+
+        let data = self.data;
+        let n_samples = self.data.len(); // Number of samples in data.
+
+        // Checks that the supplied perplexity is suitable for the number of samples at hand.
+        tsne::check_perplexity(&self.perplexity, &n_samples);
+
+        let embedding_dim = self.embedding_dim as usize;
+        // Number of  points ot consider when approximating the conditional distribution P.
+        let n_neighbors: usize = (T::from(3.0).unwrap() * self.perplexity).as_();
+        // NUmber of entries in gradient and gains matrices.
+        let grad_entries = n_samples * embedding_dim;
+        // Number of entries in pairwise measures matrices.
+        let pairwise_entries = n_samples * n_neighbors;
+
+        // Prepare buffers
+        tsne::prepare_buffers(
+            &mut self.y,
+            &mut self.dy,
+            &mut self.uy,
+            &mut self.gains,
+            &grad_entries,
+        );
+        // The P distribution values are restricted to a subset of size n_neighbors for each input
+        // sample.
+        self.p_values.resize(pairwise_entries, T::zero().into());
+
+        // This vector is used to keep track of the indexes for each nearest neighbors of each
+        // sample. There's a one to one correspondence between the elements of p_columns
+        // an the elements of p_values: for each row i of length n_neighbors of such matrices it
+        // holds that p_columns[i][j] corresponds to the index sample which contributes
+        // to p_values[i][j]. This vector is freed inside symmetrize_sparse_matrix.
+        let mut p_columns: Vec<tsne::Aligned<usize>> = vec![0.into(); pairwise_entries];
+
+        // Computes sparse input similarities using a vantage point tree.
+        {
+            // Distances buffer.
+            let mut distances: Vec<tsne::Aligned<T>> = vec![T::zero().into(); pairwise_entries];
+
+            // Build ball tree on data set. The tree is freed at the end of the scope.
+            let tree = tsne::VPTree::new(data, &metric_f);
+
+            // For each sample in the dataset compute the perplexities using a vantage point tree
+            // in parallel.
+            {
+                let perplexity = &self.perplexity; // Immutable borrow must be outside.
+                self.p_values
+                    .par_chunks_mut(n_neighbors)
+                    .zip(distances.par_chunks_mut(n_neighbors))
+                    .zip(p_columns.par_chunks_mut(n_neighbors))
+                    .zip(data.par_iter())
+                    .enumerate()
+                    .for_each(
+                        |(index, (((p_values_row, distances_row), p_columns_row), sample))| {
+                            // Writes the indices and the distances of the nearest neighbors of sample.
+                            tree.search(
+                                sample,
+                                index,
+                                n_neighbors + 1, // The first NN is sample itself.
+                                p_columns_row,
+                                distances_row,
+                                &metric_f,
+                            );
+                            debug_assert!(!p_columns_row.iter().any(|i| i.0 == index));
+                            tsne::search_beta(p_values_row, distances_row, perplexity);
+                        },
+                    );
             }
         }
 
-        // Perform gradient update with momentum and gains.
-        for i in 0..(n * no_dims) {
-            uy[i] = momentum * uy[i] - eta * gains[i] * dy[i];
-        }
-        for i in 0..(n * no_dims) {
-            y[i] += uy[i];
-        }
+        // Symmetrize sparse P matrix.
+        tsne::symmetrize_sparse_matrix(
+            &mut self.p_rows,
+            &mut self.p_columns,
+            p_columns,
+            &mut self.p_values,
+            n_samples,
+            &n_neighbors,
+        );
 
-        // Make solution zero mean.
-        zero_mean(y, n, no_dims);
+        // Normalize P values.
+        tsne::normalize_p_values(&mut self.p_values);
 
-        // Stop lying about the P-values after a while, and switch momentum.
-        if iter == stop_lying_iter {
-            if exact {
-                for el in &mut p[..] {
-                    *el /= T::from(12.0).unwrap();
-                }
-            } else {
-                for el in val_p.iter_mut().take(row_p[n]) {
-                    *el /= T::from(12.0).unwrap();
-                }
+        // Initialize solution randomly.
+        tsne::random_init(&mut self.y);
+
+        // Prepares buffers for Barnes-Hut algorithm.
+        let mut positive_forces: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
+        let mut negative_forces: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
+        let mut forces_buffer: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
+        let mut q_sums: Vec<tsne::Aligned<T>> = vec![T::zero().into(); n_samples];
+
+        // Vector used to store the mean values for each embedding dimension. It's used
+        // to make the solution zero mean.
+        let mut means: Vec<T> = vec![T::zero(); embedding_dim];
+
+        // Main Training loop.
+        for epoch in 0..self.epochs {
+            {
+                // Construct space partitioning tree on current embedding.
+                let tree = tsne::SPTree::new(&embedding_dim, &self.y, &n_samples);
+                // Check if the SPTree is correct.
+                debug_assert!(tree.is_correct(), "error: SPTree is not correct.");
+
+                // Computes forces using the Barnes-Hut algorithm in parallel.
+                // Each chunk of positive_forces and negative_forces is associated to a distinct
+                // embedded sample in y. As a consequence of this the computation can be done in
+                // parallel.
+                positive_forces
+                    .par_chunks_mut(embedding_dim)
+                    .zip(negative_forces.par_chunks_mut(embedding_dim))
+                    .zip(forces_buffer.par_chunks_mut(embedding_dim))
+                    .zip(q_sums.par_iter_mut())
+                    .zip(self.y.par_chunks(embedding_dim))
+                    .enumerate()
+                    .for_each(
+                        |(
+                            index,
+                            (
+                                (
+                                    ((positive_forces_row, negative_forces_row), forces_buffer_row),
+                                    q_sum,
+                                ),
+                                sample,
+                            ),
+                        )| {
+                            tree.compute_edge_forces(
+                                index,
+                                sample,
+                                &self.p_rows,
+                                &self.p_columns,
+                                &self.p_values,
+                                forces_buffer_row,
+                                positive_forces_row,
+                            );
+                            tree.compute_non_edge_forces(
+                                index,
+                                &theta,
+                                negative_forces_row,
+                                forces_buffer_row,
+                                q_sum,
+                            );
+                        },
+                    );
+            }
+
+            // Compute final Barnes-Hut t-SNE gradient approximation.
+            // Reduces partial sums of Q distribution.
+            let q_sum: T = q_sums.par_iter_mut().map(|sum| sum.0).sum();
+            self.dy
+                .par_iter_mut()
+                .zip(positive_forces.par_iter_mut())
+                .zip(negative_forces.par_iter_mut())
+                .for_each(|((grad, pf), nf)| {
+                    grad.0 = pf.0 - (nf.0 / q_sum);
+                    pf.0 = T::zero();
+                    nf.0 = T::zero();
+                });
+            // Zeroes Q-sums.
+            q_sums.par_iter_mut().for_each(|sum| sum.0 = T::zero());
+
+            // Updates the embedding in parallel with gradient descent.
+            tsne::update_solution(
+                &mut self.y,
+                &self.dy,
+                &mut self.uy,
+                &mut self.gains,
+                &self.learning_rate,
+                &self.momentum,
+            );
+
+            // Make solution zero-mean.
+            tsne::zero_mean(&mut means, &mut self.y, &n_samples, &embedding_dim);
+
+            // Stop lying about the P-values if the time is right.
+            if epoch == self.stop_lying_epoch {
+                tsne::stop_lying(&mut self.p_values);
+            }
+
+            // Switches momentum if the time is right.
+            if epoch == self.momentum_switch_epoch {
+                self.momentum = self.final_momentum;
             }
         }
-        if iter == mom_switch_iter {
-            momentum = final_momentum;
+        // Clears buffers used for fitting.
+        tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+        self
+    }
+
+    /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
+    /// 2 or 3 the resulting csv file will have some simple headers:
+    ///
+    /// * x, y for 2 dimensions.
+    ///
+    /// * x, y, z for 3 dimensions.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - path of the file to write the embedding to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error is something goes wrong during the I/O operations.
+    #[cfg(feature = "csv")]
+    pub fn write_csv<'a>(&'a mut self, path: &str) -> Result<&'a mut Self, Box<dyn Error>>
+    where
+        T: Float + Display,
+    {
+        let mut writer = csv::Writer::from_path(path)?;
+
+        // String-ify the embedding.
+        let to_write = self
+            .y
+            .iter()
+            .map(|el| el.0.to_string())
+            .collect::<Vec<String>>();
+
+        // Write headers.
+        match self.embedding_dim {
+            2 => writer.write_record(&["x", "y"])?,
+            3 => writer.write_record(&["x", "y", "z"])?,
+            _ => (), // Write no headers for embedding dimensions greater that 3.
         }
+        // Write records.
+        for record in to_write.chunks(self.embedding_dim as usize) {
+            writer.write_record(record)?
+        }
+        // Final flush.
+        writer.flush()?;
+        // Everything went smooth.
+        Ok(self)
     }
 }
 
@@ -261,143 +706,53 @@ pub fn run<T>(
 ///
 /// # Arguments
 ///
-/// * `file_path` -`&str` that specifies the path of the file to load the data from.
+/// * `file_path` - path of the file to load the data from.
 ///
-/// * `has_headers` - `bool` value that specifies whether the file has headers or not. if `has_headers`
-/// is set to `true` the function will not parse the first line of the .csv file.
+/// * `has_headers` - whether the file has headers or not. if set to `true` the function will
+/// not parse the first line of the csv file.
 ///
-/// * `skip_col` - `Option<usize>` that may specify a column of the file that must not be parsed.
+/// * `skip` - an optional slice that specifies a subset of the file columns that must not be
+/// parsed.
+///
+/// * `f` - function that converts [`String`] into a data sample. It takes as an argument a single
+/// record field.
+///
+/// # Errors
+///
+/// Returns an error is something goes wrong during the I/O operations.
 #[cfg(feature = "csv")]
-pub fn load_csv<T>(file_path: &str, has_headers: bool, skip_col: Option<usize>) -> Vec<T>
-where
-    T: Float + std::str::FromStr + std::fmt::Debug,
-    <T as std::str::FromStr>::Err: std::fmt::Debug,
-{
-    // Declaring the vectors where we'll put the parsed data.
+pub fn load_csv<T, F: Fn(String) -> T>(
+    path: &str,
+    has_headers: bool,
+    skip: Option<&[usize]>,
+    f: F,
+) -> Result<Vec<T>, Box<dyn Error>> {
     let mut data: Vec<T> = Vec::new();
-    // Opening the file.
-    let file = match File::open(file_path) {
-        Ok(file) => file,
-        Err(e) => panic!("error: tsne couldn't open the .csv file, {}", e),
-    };
-    let mut rdr = csv::ReaderBuilder::new()
+
+    let file = File::open(path)?;
+
+    let mut reader = csv::ReaderBuilder::new()
         .has_headers(has_headers)
         .from_reader(file);
 
-    match skip_col {
-        Some(tc) => {
-            for result in rdr.records() {
-                let record = match result {
-                    Ok(res) => res,
-                    Err(e) => panic!("error: while parsing records, {}", e),
-                };
-                for i in 0..record.len() {
-                    if i != tc {
-                        data.push(record.get(i).unwrap().parse().unwrap())
-                    }
-                }
+    match skip {
+        Some(range) => {
+            for result in reader.records() {
+                let record = result?;
+
+                (0..record.len())
+                    .filter(|column| !range.contains(column))
+                    .for_each(|field| data.push(f(record.get(field).unwrap().to_string())));
             }
         }
         None => {
-            for result in rdr.records() {
-                let record = match result {
-                    Ok(res) => res,
-                    Err(e) => panic!("error: while parsing records, {}", e),
-                };
-                for i in 0..record.len() {
-                    data.push(record.get(i).unwrap().parse().unwrap())
-                }
+            for result in reader.records() {
+                let record = result?;
+
+                (0..record.len())
+                    .for_each(|field| data.push(f(record.get(field).unwrap().to_string())));
             }
         }
     }
-    data
-}
-
-/// Writes the embedding to a csv file.
-///
-/// # Arguments
-///
-/// * `file_path` - `&str` that specifies the path of the file to write the embedding to.
-///
-/// * `embedding`- `&mut [T]` where the embedding is stored. `T` must implement `num_traits::Float`.
-///
-/// * `dims` - `usize` representing the dimension of the embedding's space. If the emdedding's space has more than three or less than two dimensions
-/// the resultant file won't have headers.
-#[cfg(feature = "csv")]
-pub fn write_csv<T>(file_path: &str, embedding: Vec<T>, dims: usize)
-where
-    T: Float + std::fmt::Display,
-{
-    let mut wtr: csv::Writer<File> = match csv::Writer::from_path(file_path) {
-        Ok(writer) => writer,
-        Err(e) => panic!("error: during the opening of the file : {}", e),
-    };
-
-    // String-ify the embedding.
-    let to_write: Vec<String> = embedding
-        .iter()
-        .map(|el| el.to_string())
-        .collect::<Vec<String>>();
-
-    // Write headers.
-    match dims {
-        2 => match wtr.write_record(&["x", "y"]) {
-            Ok(_) => (),
-            Err(e) => panic!("error: during write, {}", e),
-        },
-        3 => match wtr.write_record(&["x", "y", "z"]) {
-            Ok(_) => (),
-            Err(e) => panic!("error: during write, {}", e),
-        },
-        _ => (),
-    }
-    // Write records.
-    for chunk in to_write.chunks(dims) {
-        match wtr.write_record(chunk) {
-            Ok(_) => (),
-            Err(e) => panic!("error: during write, {}", e),
-        }
-    }
-    // Final flush.
-    match wtr.flush() {
-        Ok(_) => (),
-        Err(e) => panic!("error: during flush, {}", e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    const N: usize = 150;
-    const D: usize = 4;
-    const THETA: f32 = 0.5;
-    const PERPLEXITY: f32 = 10.;
-    const MAX_ITER: u64 = 2_000;
-    const NO_DIMS: usize = 2;
-
-    #[test]
-    #[cfg(not(tarpaulin_include))]
-    fn vanilla_tsne() {
-        let mut data: Vec<f32> = super::load_csv("iris.csv", true, Some(4));
-        let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
-
-        super::run(
-            &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, 0., false, MAX_ITER, 250, 250,
-        );
-
-        super::write_csv("iris_embedding_vanilla.csv", y, NO_DIMS);
-    }
-
-    #[test]
-    #[cfg(not(tarpaulin_include))]
-    fn barnes_hut_tsne() {
-        let mut data: Vec<f32> = super::load_csv("iris.csv", true, Some(4));
-        let mut y: Vec<f32> = vec![0.0; N * NO_DIMS];
-
-        super::run(
-            &mut data, N, D, &mut y, NO_DIMS, PERPLEXITY, THETA, false, MAX_ITER, 250, 250,
-        );
-
-        super::write_csv("iris_embedding_barnes_hut.csv", y, NO_DIMS);
-    }
+    Ok(data)
 }

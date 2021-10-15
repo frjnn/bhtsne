@@ -18,6 +18,6 @@ jobs:
           command: >-
             docker run --security-opt seccomp=unconfined
             -v $PWD:/volume xd009642/tarpaulin
-            cargo tarpaulin --out Xml --all-features
+            cargo tarpaulin --out Xml --all-features --timeout 600
       - codecov/upload:
           file: cobertura.xml
