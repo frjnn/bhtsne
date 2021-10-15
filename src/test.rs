@@ -1,4 +1,4 @@
-use super::tSNE;
+use super::{tSNE, tsne};
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
@@ -72,24 +72,32 @@ fn set_perplexity() {
 
 #[test]
 #[cfg(not(tarpaulin_include))]
-fn vanilla_tsne() {
+fn exact_tsne() {
     let data: Vec<f32> =
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
     let samples: Vec<&[f32]> = data.chunks(D).collect::<Vec<&[f32]>>();
 
     let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS);
-    tsne.perplexity(PERPLEXITY);
-    tsne.epochs(EPOCHS);
-    tsne.exact(|sample_a, sample_b| {
-        sample_a
-            .iter()
-            .zip(sample_b.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum()
-    });
-
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .exact(|sample_a, sample_b| {
+            sample_a
+                .iter()
+                .zip(sample_b.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum()
+        });
     tsne.write_csv("iris_embedding_vanilla.csv").unwrap();
+
+    assert!(
+        tsne::evaluate_error(
+            &tsne.p_values,
+            &tsne.y,
+            &samples.len(),
+            &(tsne.embedding_dim as usize)
+        ) < 0.5
+    );
 }
 
 #[test]
@@ -99,8 +107,8 @@ fn barnes_hut_tsne() {
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
     let samples: Vec<&[f32]> = data.chunks(D).collect::<Vec<&[f32]>>();
 
-    tSNE::new(&samples)
-        .embedding_dim(NO_DIMS)
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
         .perplexity(PERPLEXITY)
         .epochs(EPOCHS)
         .barnes_hut(THETA, |sample_a, sample_b| {
@@ -113,4 +121,16 @@ fn barnes_hut_tsne() {
         })
         .write_csv("iris_embedding_barnes_hut.csv")
         .unwrap();
+
+    assert!(
+        tsne::evaluate_error_approximately(
+            &tsne.p_rows,
+            &tsne.p_columns,
+            &tsne.p_values,
+            &tsne.y,
+            &samples.len(),
+            &(tsne.embedding_dim as usize),
+            &THETA
+        ) < 5.0
+    );
 }

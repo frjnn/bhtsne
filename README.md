@@ -21,9 +21,11 @@ bhtsne = "0.5.0"
 ```
 ### Documentation
 
-The docs are available [here](https://docs.rs/bhtsne).
+The API documentation is available [here](https://docs.rs/bhtsne).
 
 ### Example
+
+The implementation supports custom data types and custom defined metrics. For instance, general vector data can be handled in the following way.
 
 ```rust
  use bhtsne;
@@ -38,6 +40,7 @@ The docs are available [here](https://docs.rs/bhtsne).
  const MAX_ITER: usize = 2000; // Number of fitting iterations.
  const NO_DIMS: u8 = 2;        // Dimensionality of the embedded space.
  const EPOCHS: usize = 2000;
+ 
  // Loads the data from a csv file skipping the first row,
  // treating it as headers and skipping the 5th column,
  // treating it as a class label.
@@ -63,8 +66,9 @@ The docs are available [here](https://docs.rs/bhtsne).
      .write_csv("iris_embedding.csv")?;
 ```
 
+In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
 
 ## MNIST embedding
-The following embedding has been obtained by preprocessing the MNIST dataset using PCA to reduce its 
+The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) dataset using PCA to reduce its 
 dimensionality to 50.
 ![mnist](imgs/mnist_embedding.png) 

@@ -1,9 +1,9 @@
 [package]
 name = "bhtsne"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["frjnn <f.iannelli.francesco229@gmail.com>"]
 edition = "2018"
-description = "Vanilla and Barnes-Hut implementations of t-SNE."
+description = "Exact and Barnes-Hut implementations of t-SNE."
 repository = "https://github.com/frjnn/bhtsne"
 license = "MIT"
 keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "machine-learning"]

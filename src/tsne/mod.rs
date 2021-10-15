@@ -1,5 +1,6 @@
 mod sptree;
 mod vptree;
+
 use num_traits::{AsPrimitive, Float};
 use rand_distr::{Distribution, Normal};
 use rayon::{
@@ -280,12 +281,13 @@ pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign 
 ///
 /// * `n_neighbors` - number of nearest neighbors to consider.
 pub(super) fn symmetrize_sparse_matrix<T>(
+    sym_p_rows: &mut Vec<usize>,
+    sym_p_columns: &mut Vec<usize>,
     p_columns: Vec<Aligned<usize>>,
     p_values: &mut Vec<Aligned<T>>,
     n_samples: usize,
     n_neighbors: &usize,
-) -> (Vec<usize>, Vec<usize>)
-where
+) where
     T: Float + Add + DivAssign + Send + Sync + MulAssign,
 {
     // Each entry of row_counts corresponds to the number of elements for each corresponding row of
@@ -363,7 +365,8 @@ where
         .for_each(|p| p.0 *= T::from(0.5).unwrap());
 
     *p_values = sym_val_p;
-    (sym_row_p, sym_col_p)
+    *sym_p_rows = sym_row_p;
+    *sym_p_columns = sym_col_p;
 }
 
 /// Updates the embedding.
@@ -464,94 +467,138 @@ pub(super) fn zero_mean<T>(
     means.iter_mut().for_each(|el| *el = T::zero());
 }
 
-// TODO: rewrite this.
-// /// Evaluate t-SNE cost function exactly.
-// #[allow(dead_code)]
-// pub fn evaluate_error<T>(p: &mut [T], y: &[T], n: usize, d: usize) -> T
-// where
-//     T: Float + std::ops::AddAssign + std::ops::Add + std::ops::DivAssign + std::iter::Sum,
-// {
-//     let mut dd: Vec<T> = vec![T::zero(); n * n];
-//     let mut q: Vec<T> = vec![T::zero(); n * n];
-//     compute_squared_euclidean_distance(y, n, d, &mut dd);
+/// Evaluate t-SNE cost function exactly.
+///
+/// # Arguments
+///
+/// * `p_values` - values of the P distribution.
+///
+/// * `y` - current embedding.
+///
+/// * `n_samples` - number of samples in the embedding;
+///
+/// * `embedding_dim` - dimensionality of the embedding space.
+#[allow(dead_code)]
+pub(crate) fn evaluate_error<T: Float + Send + Sync>(
+    p_values: &[Aligned<T>],
+    y: &[Aligned<T>],
+    n_samples: &usize,
+    embedding_dim: &usize,
+) -> T
+where
+    T: Float + AddAssign + Add + DivAssign + Sum,
+{
+    let mut distances: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * n_samples];
+    compute_pairwise_distance_matrix(
+        &mut distances,
+        |a: &[Aligned<T>], b: &[Aligned<T>]| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(aa, bb)| (aa.0 - bb.0).powi(2))
+                .sum::<T>()
+        },
+        |i| &y[i * *embedding_dim..(i + 1) * *embedding_dim],
+        n_samples,
+    );
 
-//     // Compute Q-matrix and normalization sum.
-//     let mut nn: usize = 0;
-//     let mut sum_q = T::min_positive_value();
-//     for _n in 0..n {
-//         for m in 0..n {
-//             if _n != m {
-//                 q[nn + m] = T::one() / (T::one() + dd[nn + m]);
-//                 sum_q += q[nn + m];
-//             } else {
-//                 q[nn + m] = T::min_positive_value();
-//             }
-//         }
-//         nn += n;
-//     }
+    let mut q_values: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * n_samples];
+    q_values
+        .par_iter_mut()
+        .zip(distances.par_iter())
+        .for_each(|(q, d)| q.0 = T::one() / (T::one() + d.0));
 
-//     for el in &mut q[..] {
-//         *el /= sum_q;
-//     }
+    let q_sum = q_values.par_iter().map(|q| q.0).sum::<T>();
+    q_values.par_iter_mut().for_each(|q| q.0 /= q_sum);
 
-//     let mut c: T = T::zero();
-//     for _n in 0..(n * n) {
-//         c += p[_n] * ((p[_n] + T::min_positive_value()) / (q[_n] + T::min_positive_value())).ln()
-//     }
-//     c
-// }
+    // Kullback-Leibler divergence.
+    p_values
+        .par_iter()
+        .zip(q_values.par_iter())
+        .fold(
+            || T::zero(),
+            |c, (p, q)| {
+                c + p.0 * ((p.0 + T::min_positive_value()) / (q.0 + T::min_positive_value())).ln()
+            },
+        )
+        .sum::<T>()
+}
 
-// /// Evaluate t-SNE cost function approximately.
-// #[allow(dead_code)]
-// pub fn evaluate_error_approx<'a, T>(
-//     row_p: &mut [usize],
-//     col_p: &mut [usize],
-//     val_p: &mut [T],
-//     y: &'a [T],
-//     n: usize,
-//     d: usize,
-//     theta: T,
-// ) -> T
-// where
-//     T: Float
-//         + std::ops::AddAssign
-//         + std::ops::SubAssign
-//         + std::ops::MulAssign
-//         + std::ops::DivAssign
-//         + NumCast,
-// {
-//     // Get estimate of normalization term.
-//     let mut tree: SPTree<T> = SPTree::new(d, y, n);
-//     let mut buff: Vec<T> = vec![T::zero(); d];
-//     let mut sum_q: T = T::zero();
-//     for _n in 0..n {
-//         tree.compute_non_edge_forces(_n, theta, &mut buff, &mut sum_q);
-//     }
-//     // Loop over all edges to compute t-SNE error.
-//     let mut ind1;
-//     let mut ind2;
-//     let mut c: T = T::zero();
-//     let mut q;
+/// Evaluate t-SNE cost function approximately.
+///
+/// # Arguments
+///
+/// * `p_rows` - rows of the sparse, symmetric P distribution matrix.
+///
+/// * `p_columns` - columns of the sparse, symmetric P distribution matrix.
+///
+/// * `p_values` - sparse symmetric P distribution matrix.
+///
+/// * `y` - current embedding.
+///
+/// * `n_samples` - number of samples.
+///
+/// * `embedding_dim` - dimensionality of the embedding space.
+///
+/// * `theta` - threshold for the Barnes-Hut algorithm.
+#[allow(dead_code)]
+pub(crate) fn evaluate_error_approximately<T: Float + Send + Sync + Debug + Display + Sum>(
+    p_rows: &[usize],
+    p_columns: &[usize],
+    p_values: &[Aligned<T>],
+    y: &[Aligned<T>],
+    n_samples: &usize,
+    embedding_dim: &usize,
+    theta: &T,
+) -> T
+where
+    T: Float + AddAssign + SubAssign + MulAssign + DivAssign,
+{
+    // Get estimate of normalization term.
+    let q_sum = {
+        let tree = SPTree::new(&embedding_dim, &y, &n_samples);
+        let mut q_sums: Vec<Aligned<T>> = vec![T::zero().into(); *n_samples];
 
-//     for _n in 0..n {
-//         ind1 = _n * d;
-//         for i in row_p[_n]..row_p[_n + 1] {
-//             q = T::zero();
-//             ind2 = col_p[i] * d;
+        let mut buffer: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * *embedding_dim];
+        let mut negative_forces: Vec<Aligned<T>> =
+            vec![T::zero().into(); n_samples * *embedding_dim];
 
-//             buff[..d].clone_from_slice(&y[ind1..(d + ind1)]);
+        q_sums
+            .par_iter_mut()
+            .zip(negative_forces.par_chunks_mut(*embedding_dim))
+            .zip(buffer.par_chunks_mut(*embedding_dim))
+            .enumerate()
+            .for_each(|(index, ((sum, negative_forces_row), buffer_row))| {
+                tree.compute_non_edge_forces(index, &theta, negative_forces_row, buffer_row, sum);
+            });
 
-//             for (i, el) in buff.iter_mut().enumerate() {
-//                 *el -= y[ind2 + i];
-//             }
+        q_sums.par_iter().map(|sum| sum.0).sum::<T>()
+    };
 
-//             for el in &buff[..] {
-//                 q += *el * *el;
-//             }
-//             q = (T::one() / (T::one() + q)) / sum_q;
-//             c += val_p[i]
-//                 * ((val_p[i] + T::min_positive_value()) / (q + T::min_positive_value())).ln();
-//         }
-//     }
-//     c
-// }
+    let mut partials: Vec<Aligned<T>> = vec![T::zero().into(); *n_samples];
+
+    partials
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(index, cost)| {
+            let sample_a = &y[index * *embedding_dim..(index + 1) * *embedding_dim];
+            for n in p_rows[index]..p_rows[index + 1] {
+                let sample_b =
+                    &y[p_columns[n] * *embedding_dim..(p_columns[n] + 1) * *embedding_dim];
+
+                let mut q = sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a.0 - b.0).powi(2))
+                    .sum::<T>();
+                q = (T::one() / (T::one() + q)) / q_sum;
+
+                // Kullback-Leibler divergence.
+                cost.0 += p_values[index].0
+                    * ((p_values[index].0 + T::min_positive_value())
+                        / (q + T::min_positive_value()))
+                    .ln();
+            }
+        });
+
+    partials.par_iter().map(|partial| partial.0).sum::<T>()
+}

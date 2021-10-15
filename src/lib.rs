@@ -6,6 +6,9 @@
 //! The implementation supports custom data types and custom defined metrics. See [`tSNE`] for more
 //! details.
 //!
+//! This crate also includes [`load_csv`], that is a commodity function to parse data, record by
+//! record, from a csv file.
+//!
 //! # Example
 //!
 //! ```
@@ -88,6 +91,8 @@ where
     embedding_dim: u8,
     perplexity: T,
     p_values: Vec<tsne::Aligned<T>>,
+    p_rows: Vec<usize>,
+    p_columns: Vec<usize>,
     q_values: Vec<tsne::Aligned<T>>,
     y: Vec<tsne::Aligned<T>>,
     dy: Vec<tsne::Aligned<T>>,
@@ -108,7 +113,7 @@ where
         + AddAssign
         + MulAssign
         + SubAssign,
-    U: Send + Sync + Debug,
+    U: Send + Sync,
 {
     /// Creates a new t-SNE instance.
     ///
@@ -171,6 +176,8 @@ where
             embedding_dim: 2,
             perplexity: T::from(20.0).unwrap(),
             p_values: Vec::new(),
+            p_rows: Vec::new(),
+            p_columns: Vec::new(),
             q_values: Vec::new(),
             y: Vec::new(),
             dy: Vec::new(),
@@ -531,8 +538,14 @@ where
         }
 
         // Symmetrize sparse P matrix.
-        let (p_rows, p_columns) =
-            tsne::symmetrize_sparse_matrix(p_columns, &mut self.p_values, n_samples, &n_neighbors);
+        tsne::symmetrize_sparse_matrix(
+            &mut self.p_rows,
+            &mut self.p_columns,
+            p_columns,
+            &mut self.p_values,
+            n_samples,
+            &n_neighbors,
+        );
 
         // Normalize P values.
         tsne::normalize_p_values(&mut self.p_values);
@@ -583,8 +596,8 @@ where
                             tree.compute_edge_forces(
                                 index,
                                 sample,
-                                &p_rows,
-                                &p_columns,
+                                &self.p_rows,
+                                &self.p_columns,
                                 &self.p_values,
                                 forces_buffer_row,
                                 positive_forces_row,
@@ -699,7 +712,8 @@ where
 ///
 /// * `skip` - a range that may specify a subset of columns that must not be parsed.
 ///
-/// * `f` - a closure that converts [`String`] into a data sample.
+/// * `f` - a closure that converts [`String`] into a data sample. It takes as an argument a single
+/// record field.
 ///
 /// # Errors
 ///
