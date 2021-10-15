@@ -6,8 +6,8 @@
 //! The implementation supports custom data types and custom defined metrics. See [`tSNE`] for more
 //! details.
 //!
-//! This crate also includes [`load_csv`], that is a commodity function to parse data, record by
-//! record, from a csv file.
+//! This crate also includes [`load_csv`], a commodity function to parse data, record by record,
+//! from a csv file.
 //!
 //! # Example
 //!
@@ -22,9 +22,8 @@
 //!                               // Small values improve accuracy but increase complexity.
 //!    
 //! const PERPLEXITY: f32 = 10.0; // Perplexity of the conditional distribution.
-//! const MAX_ITER: usize = 2000; // Number of fitting iterations.
+//! const EPOCHS: usize = 2000;   // Number of fitting iterations.
 //! const NO_DIMS: u8 = 2;        // Dimensionality of the embedded space.
-//! const EPOCHS: usize = 2000;
 //!
 //! // Loads the data from a csv file skipping the first row,
 //! // treating it as headers and skipping the 5th column,
@@ -137,7 +136,7 @@ where
     ///
     /// # Examples
     ///
-    /// The dataset in input needs to be formed by distinct entities. For instance, general vector
+    /// The dataset in input needs to be formed by singular entities. For instance, general vector
     /// data can be handled in the following way:
     ///
     /// ```
@@ -153,13 +152,12 @@ where
     /// let mut tsne: tSNE<f64, &[f32]> = tSNE::new(&vectors); // Will compute using f64s.
     /// ```
     ///
-    /// One can also use `&str`, [`String`] or custom data:
+    /// One can also use `&str`, [`String`] or custom data types:
     ///
     /// ```
     /// use bhtsne::tSNE;
     ///
     /// const N: usize = 1000; // Supposedly 1000 strings.
-    ///
     /// let strings: Vec<&str> = vec!["Hello World!"; N];
     ///
     /// let mut tsne: tSNE<f32, &str> = tSNE::new(&strings);
@@ -227,7 +225,7 @@ where
     }
 
     /// Sets a new momentum switch epoch, i.e. the epoch after which the algorithm switches to
-    /// `final_momentum`.
+    /// `final_momentum` for the map update.
     ///
     /// # Arguments
     ///
@@ -448,8 +446,11 @@ where
     ///
     /// # Arguments
     ///
-    /// * `theta` - determines the accuracy of the approximation; larger values of θ increase the
-    /// speed but decreases the accuracy.
+    /// * `theta` - determines the accuracy of the approximation. Must be **strictly greater than
+    /// 0.0**. Large values for θ increase the speed of the algorithm but decrease its accuracy.
+    /// For small values of θ it is less probable that a cell in the space partitioning tree will
+    /// be treated as a single point. For θ equal to 0.0 the method degenerates in the exact
+    /// version.
     ///
     /// * `metric_f` - metric function.
     ///
@@ -710,9 +711,10 @@ where
 /// * `has_headers` - whether the file has headers or not. if set to `true` the function will
 /// not parse the first line of the csv file.
 ///
-/// * `skip` - a range that may specify a subset of columns that must not be parsed.
+/// * `skip` - an optional slice that specifies a subset of the file columns that must not be
+/// parsed.
 ///
-/// * `f` - a closure that converts [`String`] into a data sample. It takes as an argument a single
+/// * `f` - function that converts [`String`] into a data sample. It takes as an argument a single
 /// record field.
 ///
 /// # Errors

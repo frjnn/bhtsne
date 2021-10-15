@@ -9,10 +9,10 @@
 </div>
 
 
-Parallel Barnes-Hut and exact implementations of the t-SNE algorithm written in Rust. The tree-accelerated version of the algorithm is described with fine detail in [this paper](http://lvdmaaten.github.io/publications/papers/JMLR_2014.pdf) by [Laurens van der Maaten](https://github.com/lvdmaaten). The vanilla version of the algorithm is described in [this other paper](https://www.jmlr.org/papers/volume9/vandermaaten08a/vandermaaten08a.pdf) by G. Hinton and Laurens van der Maaten.
+Parallel Barnes-Hut and exact implementations of the t-SNE algorithm written in Rust. The tree-accelerated version of the algorithm is described with fine detail in [this paper](http://lvdmaaten.github.io/publications/papers/JMLR_2014.pdf) by [Laurens van der Maaten](https://github.com/lvdmaaten). The exact, original, version of the algorithm is described in [this other paper](https://www.jmlr.org/papers/volume9/vandermaaten08a/vandermaaten08a.pdf) by [G. Hinton](https://www.cs.toronto.edu/~hinton/) and Laurens van der Maaten.
 Additional implementations of the algorithm, including this one, are listed at [this page](http://lvdmaaten.github.io/tsne/).
 
-## Usage 
+## Installation 
 
 Add this line to your `Cargo.toml`:
 ```toml
@@ -37,9 +37,8 @@ The implementation supports custom data types and custom defined metrics. For in
                                // Small values improve accuracy but increase complexity.
 
  const PERPLEXITY: f32 = 10.0; // Perplexity of the conditional distribution.
- const MAX_ITER: usize = 2000; // Number of fitting iterations.
+ const EPOCHS: usize = 2000;   // Number of fitting iterations.
  const NO_DIMS: u8 = 2;        // Dimensionality of the embedded space.
- const EPOCHS: usize = 2000;
  
  // Loads the data from a csv file skipping the first row,
  // treating it as headers and skipping the 5th column,
@@ -66,7 +65,10 @@ The implementation supports custom data types and custom defined metrics. For in
      .write_csv("iris_embedding.csv")?;
 ```
 
-In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
+In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in. 
+
+## Parallelism 
+Being built on [rayon](https://github.com/rayon-rs/rayon), the algorithm uses the same number of threads as the number of CPUs available. Do note that on systems with hyperthreading enabled this equals the number of logical cores and not the physical ones. See [rayon's FAQs](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for additional informations.
 
 ## MNIST embedding
 The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) train set using PCA to reduce its 
