@@ -69,6 +69,6 @@ The implementation supports custom data types and custom defined metrics. For in
 In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
 
 ## MNIST embedding
-The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) dataset using PCA to reduce its 
-dimensionality to 50.
+The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) train set using PCA to reduce its 
+dimensionality to 50. It took approximately **3 minutes and 6 seconds** on a 2.0GHz quad-core 10th-generation i5 MacBook Pro. 
 ![mnist](imgs/mnist_embedding.png) 
