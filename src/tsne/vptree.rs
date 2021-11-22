@@ -137,9 +137,8 @@ impl<'a, T: Float + Debug + Display + Send + Sync, U> VPTree<'a, T, U> {
                     let (_, to_cmp) = self.items[lower];
                     // Partition around the median distances.
                     let median: usize = (upper + lower) / 2;
-                    pdqselect::select_by(
-                        &mut self.items[lower + 1..upper],
-                        median,
+                    self.items[lower + 1..upper].select_nth_unstable_by(
+                        median - lower - 1,
                         &mut |a: &(usize, &U), b: &(usize, &U)| {
                             if metric_f(to_cmp, a.1) < metric_f(to_cmp, b.1) {
                                 Ordering::Less
