@@ -120,7 +120,7 @@ where
     ///
     /// `data` - dataset to execute the t-SNE algorithm on.
     ///
-    /// Accordingly to the original implementation, the following configuration is provided by
+    /// According to the original implementation, the following configuration is provided by
     /// default:
     ///
     /// * `learning_rate = 200`

@@ -250,7 +250,7 @@ pub(super) fn search_beta<T>(
     // Row normalization.
     p_values_row
         .iter_mut()
-        .for_each(|p| p.0 /= p_values_row_sum);
+        .for_each(|p| p.0 /= p_values_row_sum + T::epsilon());
 }
 
 /// Normalizes the P values.
@@ -263,7 +263,7 @@ pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign 
 ) {
     let p_values_sum: T = p_values.par_iter().map(|p| p.0).sum();
     p_values.par_iter_mut().for_each(|p| {
-        p.0 /= p_values_sum;
+        p.0 /= p_values_sum + T::epsilon();
         p.0 *= T::from(12.0).unwrap();
     });
 }
