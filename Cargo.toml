@@ -1,28 +1,25 @@
 [package]
-name = "bhtsne"
-version = "0.5.0"
 authors = ["frjnn <f.iannelli.francesco229@gmail.com>"]
-edition = "2018"
-description = "Exact and Barnes-Hut implementations of t-SNE."
-repository = "https://github.com/frjnn/bhtsne"
-license = "MIT"
-keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "machine-learning"]
 categories = ["algorithms", "science", "visualization"]
-readme = "README.md"
+description = "Exact and Barnes-Hut implementations of t-SNE."
+edition = "2018"
 exclude = ["/imgs"]
-
+keywords = ["tsne", "data-visualization", "data-analysis", "Barnes-Hut", "machine-learning"]
+license = "MIT"
+name = "bhtsne"
+readme = "README.md"
+repository = "https://github.com/frjnn/bhtsne"
+version = "0.5.1"
 
 [features]
 default = ["csv"]
 
 [dependencies]
-rand = "0.8.4"
-rand_distr = "0.4.2"
-rayon = "1.5.1"
-num-traits = "0.2.14"
 csv = {version = "1.1.6", optional = true}
+num-traits = "0.2.14"
+rand = "0.8.4"
+rand_distr = "0.4.3"
+rayon = "1.5.1"
 
 [dev-dependencies]
-csv = "1.1"
-
-
+csv = "1.1.6"
