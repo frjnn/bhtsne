@@ -700,6 +700,14 @@ where
         // Everything went smooth.
         Ok(self)
     }
+
+    /// retrieve the computed embedding directly
+    pub fn get_embedding(&self) -> Vec<T> {
+        self.y
+            .iter()
+            .map(|x| x.0)
+            .collect()
+    }
 }
 
 /// Loads data from a csv file.
