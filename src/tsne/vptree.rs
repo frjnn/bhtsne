@@ -1,20 +1,16 @@
 use num_traits::Float;
 use rand::Rng;
-use std::{
-    cmp::Ordering,
-    collections::BinaryHeap,
-    fmt::{Debug, Display},
-};
+use std::{cmp::Ordering, collections::BinaryHeap};
 
 /// A node of the vantage point tree.
-pub(crate) struct Node<T: Float + Debug + Display> {
+pub(crate) struct Node<T: Float> {
     index: usize,
     threshold: T,
     left: Option<Box<Node<T>>>,
     right: Option<Box<Node<T>>>,
 }
 
-impl<T: Float + Debug + Display> Node<T> {
+impl<T: Float> Node<T> {
     /// Creates an empty node without children and  with index equal to 0.
     fn new() -> Self {
         Node {
@@ -28,41 +24,41 @@ impl<T: Float + Debug + Display> Node<T> {
 
 /// An item on the intermediate result heap. It is used to store results from the nearest neighbors
 /// search performed of the vantage point tree.
-struct HeapItem<T: Float + Debug + Display> {
+struct HeapItem<T: Float> {
     // Index of a sample.
     index: usize,
     // Distance of the sample from the target.
     distance: T,
 }
 
-impl<T: Float + Debug + Display> PartialOrd for HeapItem<T> {
+impl<T: Float> PartialOrd for HeapItem<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.distance.partial_cmp(&other.distance)
     }
 }
 
-impl<T: Float + Debug + Display> PartialEq for HeapItem<T> {
+impl<T: Float> PartialEq for HeapItem<T> {
     fn eq(&self, other: &Self) -> bool {
         self.distance == other.distance
     }
 }
 
-impl<T: Float + Debug + Display> Eq for HeapItem<T> {}
+impl<T: Float> Eq for HeapItem<T> {}
 
-impl<T: Float + Debug + Display> Ord for HeapItem<T> {
+impl<T: Float> Ord for HeapItem<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.distance.partial_cmp(&other.distance).unwrap()
     }
 }
 
 /// Auxiliary struct used to build the vantage point tree.
-struct VPTreeBuilder<'a, T: Float + Debug + Display> {
+struct VPTreeBuilder<'a, T: Float> {
     root: &'a mut Option<Box<Node<T>>>,
     lower: usize,
     upper: usize,
 }
 
-impl<'a, T: Float + Debug + Display> VPTreeBuilder<'a, T> {
+impl<'a, T: Float> VPTreeBuilder<'a, T> {
     /// VPTreeBuilder constructor.
     ///
     /// # Arguments
@@ -78,12 +74,12 @@ impl<'a, T: Float + Debug + Display> VPTreeBuilder<'a, T> {
 }
 
 /// Vantage Point tree.
-pub(crate) struct VPTree<'a, T: Float + Debug + Display + Send + Sync, U> {
+pub(crate) struct VPTree<'a, T: Float + Send + Sync, U> {
     items: Vec<(usize, &'a U)>,
     pub(crate) root: Option<Box<Node<T>>>,
 }
 
-impl<'a, T: Float + Debug + Display + Send + Sync, U> VPTree<'a, T, U> {
+impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     /// Constructor for the `VPTree` struct.
     ///
     /// # Arguments

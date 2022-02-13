@@ -12,7 +12,6 @@ use rayon::{
 };
 pub(crate) use sptree::SPTree;
 use std::{
-    fmt::{Debug, Display},
     iter::Sum,
     ops::{Add, AddAssign, DivAssign, MulAssign, SubAssign},
 };
@@ -44,15 +43,9 @@ unsafe impl<T: Send + Sync + Copy> Sync for Aligned<T> {}
 /// # Panics
 ///
 /// If the perplexity is too large.
-pub(super) fn check_perplexity<T: Float + Display + AsPrimitive<usize>>(
-    perplexity: &T,
-    n_samples: &usize,
-) {
+pub(super) fn check_perplexity<T: Float + AsPrimitive<usize>>(perplexity: &T, n_samples: &usize) {
     if n_samples - 1 < 3 * perplexity.as_() {
-        panic!(
-            "error: the provided perplexity {} is too large for the number of data points.\n",
-            perplexity
-        );
+        panic!("error: the provided perplexity is too large for the number of data points.\n");
     }
 }
 
@@ -175,7 +168,7 @@ pub(super) fn search_beta<T>(
     distances_row: &[Aligned<T>],
     perplexity: &T,
 ) where
-    T: Send + Sync + Copy + Float + Sum + MulAssign + DivAssign + Debug,
+    T: Send + Sync + Copy + Float + Sum + MulAssign + DivAssign,
 {
     let mut found = false;
     let mut beta: T = T::one();
@@ -541,7 +534,7 @@ where
 ///
 /// * `theta` - threshold for the Barnes-Hut algorithm.
 #[allow(dead_code)]
-pub(crate) fn evaluate_error_approximately<T: Float + Send + Sync + Debug + Display + Sum>(
+pub(crate) fn evaluate_error_approximately<T: Float + Send + Sync + Sum>(
     p_rows: &[usize],
     p_columns: &[usize],
     p_values: &[Aligned<T>],

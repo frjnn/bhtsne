@@ -1,17 +1,16 @@
 use super::Aligned;
 use num_traits::{Float, NumCast};
 use std::{
-    fmt::{Debug, Display},
     iter::Sum,
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign},
 };
 /// A cell for the SPTree.
-struct SPTreeCell<T: Float + Debug + Display + Send + Sync> {
+struct SPTreeCell<T: Float + Send + Sync> {
     corner: Vec<T>,
     width: Vec<T>,
 }
 
-impl<T: Float + Debug + Display + Send + Sync> SPTreeCell<T> {
+impl<T: Float + Send + Sync> SPTreeCell<T> {
     /// Constructs a cell.
     ///
     /// # Arguments
@@ -44,19 +43,7 @@ impl<T: Float + Debug + Display + Send + Sync> SPTreeCell<T> {
 /// An SPTree.
 pub struct SPTree<'a, T>
 where
-    T: Float
-        + NumCast
-        + AddAssign
-        + MulAssign
-        + DivAssign
-        + Add
-        + Mul
-        + Div
-        + Send
-        + Sync
-        + Display
-        + Debug
-        + Sum,
+    T: Float + NumCast + AddAssign + MulAssign + DivAssign + Add + Mul + Div + Send + Sync + Sum,
 {
     dimension: usize,
     is_leaf: bool,
@@ -71,19 +58,7 @@ where
 
 impl<'a, T> SPTree<'a, T>
 where
-    T: Float
-        + NumCast
-        + AddAssign
-        + MulAssign
-        + DivAssign
-        + Add
-        + Mul
-        + Div
-        + Send
-        + Sync
-        + Display
-        + Sum
-        + Debug,
+    T: Float + NumCast + AddAssign + MulAssign + DivAssign + Add + Mul + Div + Send + Sync + Sum,
 {
     /// The constructor for SPTree, builds the tree too.
     ///

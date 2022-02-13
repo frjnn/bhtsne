@@ -67,7 +67,6 @@ use rayon::{
 #[cfg(feature = "csv")]
 use std::{error::Error, fs::File};
 use std::{
-    fmt::{Debug, Display},
     iter::Sum,
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
@@ -104,8 +103,6 @@ where
     T: Float
         + Send
         + Sync
-        + Display
-        + Debug
         + AsPrimitive<usize>
         + Sum
         + DivAssign
@@ -674,7 +671,7 @@ where
     #[cfg(feature = "csv")]
     pub fn write_csv<'a>(&'a mut self, path: &str) -> Result<&'a mut Self, Box<dyn Error>>
     where
-        T: Float + Display,
+        T: Float + ToString,
     {
         let mut writer = csv::Writer::from_path(path)?;
 
