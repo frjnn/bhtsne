@@ -295,7 +295,7 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     for _n in 0..n_samples {
         for i in p_rows(_n)..p_rows(_n + 1) {
             row_counts[_n] += 1;
-            if p_columns[p_rows(p_columns[i].0)..p_rows(p_columns[i].0 + 1)]
+            if !p_columns[p_rows(p_columns[i].0)..p_rows(p_columns[i].0 + 1)]
                 .iter()
                 .any(|el| el.0 == _n)
             {
