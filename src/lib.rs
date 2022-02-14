@@ -268,6 +268,11 @@ where
         self
     }
 
+    /// Returns the computed embedding.
+    pub fn embedding(&self) -> Vec<T> {
+        self.y.iter().map(|x| x.0).collect()
+    }
+
     /// Performs a parallel exact version of the t-SNE algorithm. Pairwise distances between samples
     /// in the input space will be computed accordingly to the supplied function `distance_f`.
     ///
@@ -696,14 +701,6 @@ where
         writer.flush()?;
         // Everything went smooth.
         Ok(self)
-    }
-
-    /// retrieve the computed embedding directly
-    pub fn get_embedding(&self) -> Vec<T> {
-        self.y
-            .iter()
-            .map(|x| x.0)
-            .collect()
     }
 }
 

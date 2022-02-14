@@ -90,6 +90,11 @@ fn exact_tsne() {
         });
     tsne.write_csv("iris_embedding_vanilla.csv").unwrap();
 
+    let embedding = tsne.embedding();
+    let points: Vec<_> = embedding.chunks(NO_DIMS as usize).collect();
+
+    assert_eq!(points.len(), samples.len());
+
     assert!(
         tsne::evaluate_error(
             &tsne.p_values,
@@ -121,6 +126,11 @@ fn barnes_hut_tsne() {
         })
         .write_csv("iris_embedding_barnes_hut.csv")
         .unwrap();
+
+    let embedding = tsne.embedding();
+    let points: Vec<_> = embedding.chunks(NO_DIMS as usize).collect();
+
+    assert_eq!(points.len(), samples.len());
 
     assert!(
         tsne::evaluate_error_approximately(
