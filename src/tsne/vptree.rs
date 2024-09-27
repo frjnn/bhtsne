@@ -1,8 +1,13 @@
-use num_traits::Float;
-use rand::Rng;
 use std::{cmp::Ordering, collections::BinaryHeap};
 
+use rand::Rng;
+
+use num_traits::Float;
+
+use crate::tsne;
+
 /// A node of the vantage point tree.
+#[derive(Clone, Debug)]
 pub(crate) struct Node<T: Float> {
     index: usize,
     threshold: T,
@@ -10,9 +15,8 @@ pub(crate) struct Node<T: Float> {
     right: Option<Box<Node<T>>>,
 }
 
-impl<T: Float> Node<T> {
-    /// Creates an empty node without children and  with index equal to 0.
-    fn new() -> Self {
+impl<T: Float> Default for Node<T> {
+    fn default() -> Self {
         Node {
             index: 0,
             threshold: T::zero(),
@@ -33,7 +37,7 @@ struct HeapItem<T: Float> {
 
 impl<T: Float> PartialOrd for HeapItem<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.distance.partial_cmp(&other.distance)
+        Some(self.cmp(other))
     }
 }
 
@@ -99,6 +103,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         };
         let n_samples = tree.items.len(); // Immutable borrow must be kept outside.
         tree.build_from_points(0, n_samples, &metric_f);
+
         tree
     }
 
@@ -111,7 +116,10 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     /// * `upper` - upper bound.
     ///
     /// * `metric_f` - metric function.
-    fn build_from_points<F: Fn(&U, &U) -> T>(&mut self, lower: usize, upper: usize, metric_f: F) {
+    fn build_from_points<F>(&mut self, lower: usize, upper: usize, metric_f: F)
+    where
+        F: Fn(&U, &U) -> T,
+    {
         let mut stack = vec![VPTreeBuilder::new(&mut self.root, lower, upper)];
         let mut thread_rng = rand::thread_rng();
 
@@ -120,8 +128,8 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
 
             // Lower index is center of current node.
             if upper != lower {
-                *root = Some(Box::new(Node::new()));
-                let mut node = root.as_deref_mut().unwrap();
+                *root = Some(Box::new(Node::default()));
+                let node = root.as_deref_mut().unwrap();
                 node.index = lower;
 
                 if upper - lower > 1 {
@@ -135,10 +143,10 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
                     let median: usize = (upper + lower) / 2;
                     self.items[lower + 1..upper].select_nth_unstable_by(
                         median - lower - 1,
-                        &mut |a: &(usize, &U), b: &(usize, &U)| {
-                            if metric_f(to_cmp, a.1) < metric_f(to_cmp, b.1) {
+                        &mut |(_, a): &(usize, &U), (_, b): &(usize, &U)| {
+                            if metric_f(to_cmp, a) < metric_f(to_cmp, b) {
                                 Ordering::Less
-                            } else if metric_f(to_cmp, a.1) == metric_f(to_cmp, b.1) {
+                            } else if metric_f(to_cmp, a) == metric_f(to_cmp, b) {
                                 Ordering::Equal
                             } else {
                                 Ordering::Greater
@@ -157,14 +165,16 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     }
 
     /// Auxiliary function that searches for the k nearest neighbors of an item.
-    fn look_up<F: Fn(&U, &U) -> T>(
+    fn look_up<F>(
         &self,
-        tau: &mut T, //Tracks the distances to the farthest point in the results.
+        tau: &mut T, // Tracks the distances to the farthest point in the results.
         target: &U,
         k: usize,
         heap: &mut BinaryHeap<HeapItem<T>>,
         metric_f: F,
-    ) {
+    ) where
+        F: Fn(&U, &U) -> T,
+    {
         let mut stack: Vec<&Option<Box<Node<T>>>> = vec![&self.root];
 
         while let Some(next_in_stack) = stack.pop() {
@@ -263,10 +273,10 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
                 let HeapItem { index, distance: _ } = result;
                 target_index != *index
             }))
-            .for_each(|((idx, d), result)| {
+            .for_each(|((tsne::Aligned(idx), tsne::Aligned(d)), result)| {
                 let HeapItem { index, distance } = result;
-                idx.0 = *index;
-                d.0 = *distance;
+                *idx = *index;
+                *d = *distance;
             });
     }
 }

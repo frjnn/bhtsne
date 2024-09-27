@@ -1,9 +1,12 @@
-use super::Aligned;
-use num_traits::{Float, NumCast};
 use std::{
     iter::Sum,
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign},
 };
+
+use num_traits::{Float, NumCast};
+
+use super::Aligned;
+
 /// A cell for the SPTree.
 struct SPTreeCell<T: Float + Send + Sync> {
     corner: Vec<T>,
@@ -36,7 +39,7 @@ impl<T: Float + Send + Sync> SPTreeCell<T> {
             .iter()
             .zip(self.corner.iter())
             .zip(self.width.iter())
-            .any(|((&p, &c), &w)| c - w > p.0 || c + w < p.0) // Asserts that the point fully lies inside the cell.
+            .any(|((Aligned(p), &c), &w)| c - w > *p || c + w < *p)
     }
 }
 
@@ -69,32 +72,32 @@ where
     /// * `data` - data to build the tree from.
     ///
     /// * `n_samples` - number of points in `inp_data`.
-    pub(crate) fn new(dimension: &usize, data: &'a [Aligned<T>], n_samples: &usize) -> Self {
+    pub(crate) fn new(dimension: usize, data: &'a [Aligned<T>], n_samples: usize) -> Self {
         // Mean for each dimension.
-        let mut mean: Vec<T> = vec![T::zero(); *dimension];
+        let mut mean: Vec<T> = vec![T::zero(); dimension];
         // Min for each dimension.
-        let mut min: Vec<T> = vec![T::max_value(); *dimension];
+        let mut min: Vec<T> = vec![T::max_value(); dimension];
         // Max for each dimension.
-        let mut max: Vec<T> = vec![-T::max_value(); *dimension];
+        let mut max: Vec<T> = vec![-T::max_value(); dimension];
         // Compute the boundaries of SPTree.
-        data.chunks(*dimension).for_each(|sample| {
+        data.chunks(dimension).for_each(|sample| {
             sample
                 .iter()
                 .zip(mean.iter_mut())
                 .zip(min.iter_mut())
                 .zip(max.iter_mut())
-                .for_each(|(((s, mean_d), min_d), max_d)| {
-                    *mean_d += s.0;
-                    *min_d = min_d.min(s.0);
-                    *max_d = max_d.max(s.0);
+                .for_each(|(((Aligned(s), mean_d), min_d), max_d)| {
+                    *mean_d += *s;
+                    *min_d = min_d.min(*s);
+                    *max_d = max_d.max(*s);
                 })
         });
 
-        mean.iter_mut()
-            .for_each(|el| *el /= T::from(*n_samples).unwrap());
+        let denominator = T::from(n_samples).unwrap();
+        mean.iter_mut().for_each(|el| *el /= denominator);
 
         // Build SPTree.
-        let mut width: Vec<T> = vec![T::zero(); *dimension];
+        let mut width: Vec<T> = vec![T::zero(); dimension];
         width
             .iter_mut()
             .zip(mean.iter())
@@ -104,8 +107,9 @@ where
                 *w = (*max_d - *mean_d).max(*mean_d - *min_d) + T::min_positive_value();
             });
 
-        let mut tree = SPTree::new_empty(*dimension, data, mean, width);
-        tree.fill(*n_samples);
+        let mut tree = SPTree::new_empty(dimension, data, mean, width);
+        tree.fill(n_samples);
+
         tree
     }
 
@@ -121,7 +125,7 @@ where
     ///
     /// * `width` - cell's width.
     fn new_empty(dimension: usize, data: &'a [Aligned<T>], corner: Vec<T>, width: Vec<T>) -> Self {
-        let n_children = (2_i32).pow(dimension as u32) as usize;
+        let n_children = 2usize.pow(dimension as u32);
         let boundary = SPTreeCell::new(corner, width);
         let children = Vec::new();
         let center_of_mass = vec![T::zero(); dimension];
@@ -164,9 +168,9 @@ where
             self.center_of_mass
                 .iter_mut()
                 .zip(point.iter())
-                .for_each(|(cm, p)| {
+                .for_each(|(cm, &p)| {
                     *cm *= m1;
-                    *cm += m2 * p.0;
+                    *cm += m2 * *p;
                 });
 
             // If there is space in this quad tree and it is a leaf, add the object here.
@@ -183,7 +187,7 @@ where
                             self.data[present * self.dimension..(present + 1) * self.dimension]
                                 .iter(),
                         )
-                        .any(|(pa, pb)| (pa.0 - pb.0).abs() >= T::min_positive_value())
+                        .any(|(&pa, &pb)| (*pa - *pb).abs() >= T::min_positive_value())
                 } else {
                     false
                 };
@@ -211,17 +215,18 @@ where
             let mut new_width: Vec<T> = vec![T::zero(); self.dimension];
 
             // Computes new corner and new width.
+            let zero_point_five = T::from(0.5).unwrap();
             new_width
                 .iter_mut()
                 .zip(new_corner.iter_mut())
                 .zip(self.boundary.width.iter())
                 .zip(self.boundary.corner.iter())
                 .for_each(|(((nw, nc), bw), bc)| {
-                    *nw = T::from(0.5).unwrap() * *bw;
+                    *nw = zero_point_five * *bw;
                     if (i / den) % 2 == 1 {
-                        *nc = *bc - T::from(0.5).unwrap() * *bw;
+                        *nc = *bc - zero_point_five * *bw;
                     } else {
-                        *nc = *bc + T::from(0.5).unwrap() * *bw;
+                        *nc = *bc + zero_point_five * *bw;
                     }
                     den *= 2;
                 });
@@ -280,20 +285,22 @@ where
     ///
     /// * `theta` - parameter specific to Barnes-Hut algorithm.
     ///
-    /// * `negative_forces` - negative forces.
+    /// * `negative_forces_row` - negative forces.
+    ///
+    /// * `forces_buffer` - buffer for the forces.
     ///
     /// * `q_sum` - cumulative sum for the multiplicative factors.
     pub(crate) fn compute_non_edge_forces(
         &self,
         index: usize,
-        theta: &T,
+        theta: T,
         negative_forces_row: &mut [Aligned<T>],
         forces_buffer: &mut [Aligned<T>],
         q_sum: &mut Aligned<T>,
     ) {
         // Make sure that  no time is spent on empty nodes or self-interactions.
         if self.cumulative_size == 0
-            || (self.is_leaf && self.index.is_some() && self.index.unwrap() == index)
+            || (self.is_leaf && self.index.map(|i| i == index).unwrap_or_default())
         {
             return;
         }
@@ -308,9 +315,9 @@ where
             .iter_mut()
             .zip(point.iter())
             .zip(self.center_of_mass.iter())
-            .for_each(|((fb, p), cm)| fb.0 = p.0 - *cm);
+            .for_each(|((fb, &p), cm)| **fb = *p - *cm);
 
-        let mut distance: T = forces_buffer.iter().map(|b| b.0.powi(2)).sum();
+        let mut distance: T = forces_buffer.iter().map(|Aligned(b)| b.powi(2)).sum();
 
         // Check whether we can use this node as a summary.
         let max_width =
@@ -319,7 +326,7 @@ where
                 .iter()
                 .fold(T::zero(), |acc, bw| if *bw >= acc { *bw } else { acc });
 
-        if self.is_leaf || (max_width / distance.sqrt() < *theta) {
+        if self.is_leaf || (max_width / distance.sqrt() < theta) {
             // Compute and add tSNE forces between point and current node.
             distance = T::one() / (T::one() + distance);
 
@@ -331,7 +338,7 @@ where
             negative_forces_row
                 .iter_mut()
                 .zip(forces_buffer.iter())
-                .for_each(|(nf, b)| nf.0 += m * b.0);
+                .for_each(|(nf, Aligned(b))| **nf += m * *b);
         } else {
             // Recursively apply Barnes-Hut to children.
             self.children.iter().for_each(|child| {
@@ -388,16 +395,19 @@ where
                 .iter_mut()
                 .zip(sample.iter())
                 .zip(other_sample.iter())
-                .for_each(|((fb, s), os)| fb.0 = s.0 - os.0);
+                .for_each(|((fb, Aligned(s)), Aligned(os))| **fb = *s - *os);
 
-            let mut distance = forces_buffer.iter().map(|fb| fb.0.powi(2)).sum::<T>();
-            distance = p_values[i].0 / (distance + T::one());
+            let mut distance = forces_buffer
+                .iter()
+                .map(|Aligned(fb)| fb.powi(2))
+                .sum::<T>();
+            distance = *p_values[i] / (distance + T::one());
 
             // Sum positive force.
             positive_forces_row
                 .iter_mut()
                 .zip(forces_buffer.iter())
-                .for_each(|(pfr, fb)| pfr.0 += distance * fb.0);
+                .for_each(|(pfr, Aligned(fb))| **pfr += distance * *fb);
         }
     }
 }

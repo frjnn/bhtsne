@@ -8,8 +8,7 @@ jobs:
       - checkout
       - run:
           name: Download iris dataset
-          command: 
-            curl -O "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv";
+          command: curl -O "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv";
       - run:
           name: Pull xd009642/tarpaulin
           command: docker pull xd009642/tarpaulin
@@ -18,6 +17,6 @@ jobs:
           command: >-
             docker run --security-opt seccomp=unconfined
             -v $PWD:/volume xd009642/tarpaulin
-            cargo tarpaulin --out Xml --all-features --timeout 600
+            cargo tarpaulin --out Xml --all-features --ignored --timeout 600
       - codecov/upload:
           file: cobertura.xml
