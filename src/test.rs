@@ -7,7 +7,6 @@ const EPOCHS: usize = 2_000;
 const NO_DIMS: u8 = 2;
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_learning_rate() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.learning_rate(15.);
@@ -15,7 +14,6 @@ fn set_learning_rate() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_epochs() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.epochs(15);
@@ -23,7 +21,6 @@ fn set_epochs() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_momentum() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.momentum(15.);
@@ -31,7 +28,6 @@ fn set_momentum() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_final_momentum() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.final_momentum(15.);
@@ -39,7 +35,6 @@ fn set_final_momentum() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_momentum_switch_epoch() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.momentum_switch_epoch(15);
@@ -47,7 +42,6 @@ fn set_momentum_switch_epoch() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_stop_lying_epoch() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.stop_lying_epoch(15);
@@ -55,7 +49,6 @@ fn set_stop_lying_epoch() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_embedding_dim() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.embedding_dim(3);
@@ -63,7 +56,6 @@ fn set_embedding_dim() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
 fn set_perplexity() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.perplexity(15.);
@@ -71,7 +63,7 @@ fn set_perplexity() {
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
+#[ignore = "requires iris dataset"]
 fn exact_tsne() {
     let data: Vec<f32> =
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
@@ -99,14 +91,14 @@ fn exact_tsne() {
         tsne::evaluate_error(
             &tsne.p_values,
             &tsne.y,
-            &samples.len(),
-            &(tsne.embedding_dim as usize)
+            samples.len(),
+            tsne.embedding_dim as usize
         ) < 0.5
     );
 }
 
 #[test]
-#[cfg(not(tarpaulin_include))]
+#[ignore = "requires iris dataset"]
 fn barnes_hut_tsne() {
     let data: Vec<f32> =
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
@@ -138,9 +130,9 @@ fn barnes_hut_tsne() {
             &tsne.p_columns,
             &tsne.p_values,
             &tsne.y,
-            &samples.len(),
-            &(tsne.embedding_dim as usize),
-            &THETA
+            samples.len(),
+            tsne.embedding_dim as usize,
+            THETA
         ) < 5.0
     );
 }

@@ -11,7 +11,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```no_run
 //! # use std::error::Error;
 //! use bhtsne;
 //!
@@ -56,7 +56,14 @@ mod tsne;
 #[cfg(test)]
 mod test;
 
-pub(crate) use num_traits::{cast::AsPrimitive, Float};
+use std::{
+    iter::Sum,
+    ops::{AddAssign, DivAssign, MulAssign, SubAssign},
+};
+
+#[cfg(feature = "csv")]
+use std::{error::Error, fs::File};
+
 use rayon::{
     iter::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
@@ -64,12 +71,8 @@ use rayon::{
     },
     slice::{ParallelSlice, ParallelSliceMut},
 };
-#[cfg(feature = "csv")]
-use std::{error::Error, fs::File};
-use std::{
-    iter::Sum,
-    ops::{AddAssign, DivAssign, MulAssign, SubAssign},
-};
+
+use num_traits::{cast::AsPrimitive, Float};
 
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
@@ -186,8 +189,9 @@ where
     /// # Arguments
     ///
     /// `learning_rate` - new value for the learning rate.
-    pub fn learning_rate<'a>(&'a mut self, learning_rate: T) -> &'a mut Self {
+    pub fn learning_rate(&mut self, learning_rate: T) -> &mut Self {
         self.learning_rate = learning_rate;
+
         self
     }
 
@@ -196,8 +200,9 @@ where
     /// # Arguments
     ///
     /// `epochs` - new value for the epochs.
-    pub fn epochs<'a>(&'a mut self, epochs: usize) -> &'a mut Self {
+    pub fn epochs(&mut self, epochs: usize) -> &mut Self {
         self.epochs = epochs;
+
         self
     }
 
@@ -206,8 +211,9 @@ where
     /// # Arguments
     ///
     /// `momentum` - new value for the momentum.
-    pub fn momentum<'a>(&'a mut self, momentum: T) -> &'a mut Self {
+    pub fn momentum(&mut self, momentum: T) -> &mut Self {
         self.momentum = momentum;
+
         self
     }
 
@@ -216,8 +222,9 @@ where
     /// # Arguments
     ///
     /// `final_momentum` - new value for the final momentum.
-    pub fn final_momentum<'a>(&'a mut self, final_momentum: T) -> &'a mut Self {
+    pub fn final_momentum(&mut self, final_momentum: T) -> &mut Self {
         self.final_momentum = final_momentum;
+
         self
     }
 
@@ -227,8 +234,9 @@ where
     /// # Arguments
     ///
     /// `momentum_switch_epoch` - new value for the momentum switch epoch.
-    pub fn momentum_switch_epoch<'a>(&'a mut self, momentum_switch_epoch: usize) -> &'a mut Self {
+    pub fn momentum_switch_epoch(&mut self, momentum_switch_epoch: usize) -> &mut Self {
         self.momentum_switch_epoch = momentum_switch_epoch;
+
         self
     }
 
@@ -239,8 +247,9 @@ where
     /// # Arguments
     ///
     /// `stop_lying_epoch` - new value for the stop lying epoch.
-    pub fn stop_lying_epoch<'a>(&'a mut self, stop_lying_epoch: usize) -> &'a mut Self {
+    pub fn stop_lying_epoch(&mut self, stop_lying_epoch: usize) -> &mut Self {
         self.stop_lying_epoch = stop_lying_epoch;
+
         self
     }
 
@@ -249,8 +258,9 @@ where
     /// # Arguments
     ///
     /// `embedding_dim` - new value for the embedding space dimensionality.
-    pub fn embedding_dim<'a>(&'a mut self, embedding_dim: u8) -> &'a mut Self {
+    pub fn embedding_dim(&mut self, embedding_dim: u8) -> &mut Self {
         self.embedding_dim = embedding_dim;
+
         self
     }
 
@@ -263,14 +273,15 @@ where
     ///  equals a predefined perplexity *u*.
     ///
     /// A good value for perplexity lies between 5.0 and 50.0.
-    pub fn perplexity<'a>(&'a mut self, perplexity: T) -> &'a mut Self {
+    pub fn perplexity(&mut self, perplexity: T) -> &mut Self {
         self.perplexity = perplexity;
+
         self
     }
 
     /// Returns the computed embedding.
     pub fn embedding(&self) -> Vec<T> {
-        self.y.iter().map(|x| x.0).collect()
+        self.y.iter().map(|tsne::Aligned(x)| *x).collect()
     }
 
     /// Performs a parallel exact version of the t-SNE algorithm. Pairwise distances between samples
@@ -283,10 +294,7 @@ where
     /// **Do note** that such a distance function needs not to be a metric distance, i.e. it is not
     /// necessary for it so satisfy the triangle inequality. Consequently, the squared euclidean
     /// distance, and many other, can be used.
-    pub fn exact<'a, F: Fn(&U, &U) -> T + Send + Sync>(
-        &'a mut self,
-        distance_f: F,
-    ) -> &'a mut Self {
+    pub fn exact<F: Fn(&U, &U) -> T + Send + Sync>(&mut self, distance_f: F) -> &mut Self {
         let data = self.data;
         let n_samples = self.data.len(); // Number of samples in data.
 
@@ -305,7 +313,7 @@ where
             &mut self.dy,
             &mut self.uy,
             &mut self.gains,
-            &grad_entries,
+            grad_entries,
         );
         // Prepare distributions matrices.
         self.p_values.resize(pairwise_entries, T::zero().into()); // P.
@@ -327,7 +335,7 @@ where
             &mut distances,
             distance_f,
             |index| &data[*index],
-            &n_samples,
+            n_samples,
         );
 
         // Compute gaussian perplexity in parallel. First, the conditional distribution is computed
@@ -347,9 +355,9 @@ where
         // obtain the joint P distribution.
         for i in 0..n_samples {
             for j in (i + 1)..n_samples {
-                let symmetric = self.p_values[j * n_samples + i].0;
-                self.p_values[i * n_samples + j].0 += symmetric;
-                self.p_values[j * n_samples + i].0 = self.p_values[i * n_samples + j].0;
+                let symmetric = *self.p_values[j * n_samples + i];
+                *self.p_values[i * n_samples + j] += symmetric;
+                *self.p_values[j * n_samples + i] = *self.p_values[i * n_samples + j];
             }
         }
 
@@ -371,21 +379,21 @@ where
                 |ith: &[tsne::Aligned<T>], jth: &[tsne::Aligned<T>]| {
                     ith.iter()
                         .zip(jth.iter())
-                        .map(|(i, j)| (i.0 - j.0).powi(2))
+                        .map(|(&i, &j)| (*i - *j).powi(2))
                         .sum()
                 },
                 |index| &self.y[index * embedding_dim..index * embedding_dim + embedding_dim],
-                &n_samples,
+                n_samples,
             );
 
             // Computes Q.
             self.q_values
                 .par_iter_mut()
                 .zip(distances.par_iter())
-                .for_each(|(q, d)| q.0 = T::one() / (T::one() + d.0));
+                .for_each(|(tsne::Aligned(q), tsne::Aligned(d))| *q = T::one() / (T::one() + *d));
 
             // Computes the exact gradient in parallel.
-            let q_values_sum: T = self.q_values.par_iter().map(|q| q.0).sum();
+            let q_values_sum: T = self.q_values.par_iter().map(|&q| *q).sum();
 
             // Immutable borrow to self must happen outside of the inner sequential
             // loop. The outer parallel loop already has a mutable borrow.
@@ -401,14 +409,14 @@ where
                             .iter()
                             .zip(q_values_sample.iter())
                             .zip(y.chunks(embedding_dim))
-                            .for_each(|((p, q), other_sample)| {
-                                let m: T = (p.0 - q.0 / q_values_sum) * q.0;
+                            .for_each(|((&p, &q), other_sample)| {
+                                let m: T = (*p - *q / q_values_sum) * *q;
                                 dy_sample
                                     .iter_mut()
                                     .zip(y_sample.iter())
                                     .zip(other_sample.iter())
-                                    .for_each(|((dy_el, y_el), other_el)| {
-                                        dy_el.0 += (y_el.0 - other_el.0) * m
+                                    .for_each(|((tsne::Aligned(dy_el), &y_el), &other_el)| {
+                                        *dy_el += (*y_el - *other_el) * m
                                     });
                             });
                     },
@@ -423,11 +431,14 @@ where
                 &self.learning_rate,
                 &self.momentum,
             );
+
             // Zeroes the gradient.
-            self.dy.iter_mut().for_each(|el| el.0 = T::zero());
+            self.dy
+                .iter_mut()
+                .for_each(|tsne::Aligned(el)| *el = T::zero());
 
             // Make solution zero mean.
-            tsne::zero_mean(&mut means, &mut self.y, &n_samples, &embedding_dim);
+            tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
             // Stop lying about the P-values if the time is right.
             if epoch == self.stop_lying_epoch {
@@ -441,6 +452,7 @@ where
         }
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+
         self
     }
 
@@ -448,22 +460,20 @@ where
     ///
     /// # Arguments
     ///
-    /// * `theta` - determines the accuracy of the approximation. Must be **strictly greater than
-    /// 0.0**. Large values for θ increase the speed of the algorithm but decrease its accuracy.
-    /// For small values of θ it is less probable that a cell in the space partitioning tree will
-    /// be treated as a single point. For θ equal to 0.0 the method degenerates in the exact
-    /// version.
+    /// * `theta` - determines the accuracy of the approximation. Must be **strictly greater than 0.0**.
+    ///   Large values for θ increase the speed of the algorithm but decrease its accuracy.
+    ///   For small values of θ it is less probable that a cell in the space partitioning tree will
+    ///   be treated as a single point. For θ equal to 0.0 the method degenerates in the exact
+    ///   version.
     ///
     /// * `metric_f` - metric function.
     ///
-    ///
     /// **Do note that** `metric_f` **must be a metric distance**, i.e. it must
     /// satisfy the [triangle inequality](https://en.wikipedia.org/wiki/Triangle_inequality).
-    pub fn barnes_hut<'a, F: Fn(&U, &U) -> T + Send + Sync>(
-        &'a mut self,
-        theta: T,
-        metric_f: F,
-    ) -> &'a mut Self {
+    pub fn barnes_hut<F>(&mut self, theta: T, metric_f: F) -> &mut Self
+    where
+        F: Fn(&U, &U) -> T + Send + Sync,
+    {
         // Checks that theta is valid.
         assert!(
             theta > T::zero(),
@@ -491,7 +501,7 @@ where
             &mut self.dy,
             &mut self.uy,
             &mut self.gains,
-            &grad_entries,
+            grad_entries,
         );
         // The P distribution values are restricted to a subset of size n_neighbors for each input
         // sample.
@@ -510,7 +520,7 @@ where
             let mut distances: Vec<tsne::Aligned<T>> = vec![T::zero().into(); pairwise_entries];
 
             // Build ball tree on data set. The tree is freed at the end of the scope.
-            let tree = tsne::VPTree::new(data, &metric_f);
+            let tree = tsne::vptree::VPTree::new(data, &metric_f);
 
             // For each sample in the dataset compute the perplexities using a vantage point tree
             // in parallel.
@@ -533,7 +543,7 @@ where
                                 distances_row,
                                 &metric_f,
                             );
-                            debug_assert!(!p_columns_row.iter().any(|i| i.0 == index));
+                            debug_assert!(!p_columns_row.iter().any(|&i| *i == index));
                             tsne::search_beta(p_values_row, distances_row, perplexity);
                         },
                     );
@@ -570,7 +580,7 @@ where
         for epoch in 0..self.epochs {
             {
                 // Construct space partitioning tree on current embedding.
-                let tree = tsne::SPTree::new(&embedding_dim, &self.y, &n_samples);
+                let tree = tsne::sptree::SPTree::new(embedding_dim, &self.y, n_samples);
                 // Check if the SPTree is correct.
                 debug_assert!(tree.is_correct(), "error: SPTree is not correct.");
 
@@ -607,7 +617,7 @@ where
                             );
                             tree.compute_non_edge_forces(
                                 index,
-                                &theta,
+                                theta,
                                 negative_forces_row,
                                 forces_buffer_row,
                                 q_sum,
@@ -623,13 +633,17 @@ where
                 .par_iter_mut()
                 .zip(positive_forces.par_iter_mut())
                 .zip(negative_forces.par_iter_mut())
-                .for_each(|((grad, pf), nf)| {
-                    grad.0 = pf.0 - (nf.0 / q_sum);
-                    pf.0 = T::zero();
-                    nf.0 = T::zero();
-                });
+                .for_each(
+                    |((tsne::Aligned(grad), tsne::Aligned(pf)), tsne::Aligned(nf))| {
+                        *grad = *pf - (*nf / q_sum);
+                        *pf = T::zero();
+                        *nf = T::zero();
+                    },
+                );
             // Zeroes Q-sums.
-            q_sums.par_iter_mut().for_each(|sum| sum.0 = T::zero());
+            q_sums
+                .iter_mut()
+                .for_each(|tsne::Aligned(sum)| *sum = T::zero());
 
             // Updates the embedding in parallel with gradient descent.
             tsne::update_solution(
@@ -642,7 +656,7 @@ where
             );
 
             // Make solution zero-mean.
-            tsne::zero_mean(&mut means, &mut self.y, &n_samples, &embedding_dim);
+            tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
             // Stop lying about the P-values if the time is right.
             if epoch == self.stop_lying_epoch {
@@ -656,6 +670,7 @@ where
         }
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+
         self
     }
 
@@ -674,7 +689,7 @@ where
     ///
     /// Returns an error is something goes wrong during the I/O operations.
     #[cfg(feature = "csv")]
-    pub fn write_csv<'a>(&'a mut self, path: &str) -> Result<&'a mut Self, Box<dyn Error>>
+    pub fn write_csv(&mut self, path: &str) -> Result<&mut Self, Box<dyn Error>>
     where
         T: Float + ToString,
     {
@@ -684,13 +699,13 @@ where
         let to_write = self
             .y
             .iter()
-            .map(|el| el.0.to_string())
+            .map(|&el| (*el).to_string())
             .collect::<Vec<String>>();
 
         // Write headers.
         match self.embedding_dim {
-            2 => writer.write_record(&["x", "y"])?,
-            3 => writer.write_record(&["x", "y", "z"])?,
+            2 => writer.write_record(["x", "y"])?,
+            3 => writer.write_record(["x", "y", "z"])?,
             _ => (), // Write no headers for embedding dimensions greater that 3.
         }
         // Write records.
@@ -699,6 +714,7 @@ where
         }
         // Final flush.
         writer.flush()?;
+
         // Everything went smooth.
         Ok(self)
     }
@@ -711,24 +727,27 @@ where
 /// * `file_path` - path of the file to load the data from.
 ///
 /// * `has_headers` - whether the file has headers or not. if set to `true` the function will
-/// not parse the first line of the csv file.
+///   not parse the first line of the csv file.
 ///
 /// * `skip` - an optional slice that specifies a subset of the file columns that must not be
-/// parsed.
+///   parsed.
 ///
 /// * `f` - function that converts [`String`] into a data sample. It takes as an argument a single
-/// record field.
+///   record field.
 ///
 /// # Errors
 ///
 /// Returns an error is something goes wrong during the I/O operations.
 #[cfg(feature = "csv")]
-pub fn load_csv<T, F: Fn(String) -> T>(
+pub fn load_csv<T, F>(
     path: &str,
     has_headers: bool,
     skip: Option<&[usize]>,
     f: F,
-) -> Result<Vec<T>, Box<dyn Error>> {
+) -> Result<Vec<T>, Box<dyn Error>>
+where
+    F: Fn(String) -> T,
+{
     let mut data: Vec<T> = Vec::new();
 
     let file = File::open(path)?;
@@ -756,5 +775,6 @@ pub fn load_csv<T, F: Fn(String) -> T>(
             }
         }
     }
+
     Ok(data)
 }

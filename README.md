@@ -17,7 +17,7 @@ Additional implementations of the algorithm, including this one, are listed at [
 Add this line to your `Cargo.toml`:
 ```toml
 [dependencies]
-bhtsne = "0.5.2"
+bhtsne = "0.5.3"
 ```
 ### Documentation
 
