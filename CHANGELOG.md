@@ -2,7 +2,7 @@
 
 ## 0.5.3
 
-Bump dependencies.
+Bump dependencies [(#13)](https://github.com/frjnn/bhtsne/pull/13)
 
 
 ## 0.5.2
