@@ -4,7 +4,7 @@ use rand::Rng;
 
 use num_traits::Float;
 
-use crate::tsne;
+use crossbeam::utils::CachePadded;
 
 /// A node of the vantage point tree.
 #[derive(Clone, Debug)]
@@ -121,7 +121,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         F: Fn(&U, &U) -> T,
     {
         let mut stack = vec![VPTreeBuilder::new(&mut self.root, lower, upper)];
-        let mut thread_rng = rand::thread_rng();
+        let mut thread_rng = rand::rng();
 
         while let Some(builder) = stack.pop() {
             let VPTreeBuilder { root, lower, upper } = builder;
@@ -135,7 +135,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
                 if upper - lower > 1 {
                     // If we did not arrive at leaf yet choose an arbitrary point
                     // and move it to the start.
-                    let i = thread_rng.gen_range(lower..upper);
+                    let i = thread_rng.random_range(lower..upper);
                     self.items.swap(lower, i);
 
                     let (_, to_cmp) = self.items[lower];
@@ -178,7 +178,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         let mut stack: Vec<&Option<Box<Node<T>>>> = vec![&self.root];
 
         while let Some(next_in_stack) = stack.pop() {
-            if let Some(ref node) = next_in_stack {
+            if let Some(node) = next_in_stack {
                 let (original_position, point) = &self.items[node.index];
                 // Compute distances between target and current node.
                 let distance: T = metric_f(point, target);
@@ -250,8 +250,8 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         target: &U,
         target_index: usize,
         k: usize,
-        neighbors_indices: &mut [super::Aligned<usize>],
-        distances: &mut [super::Aligned<T>],
+        neighbors_indices: &mut [CachePadded<usize>],
+        distances: &mut [CachePadded<T>],
         metric_f: F,
     ) where
         F: Fn(&U, &U) -> T,
@@ -273,10 +273,10 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
                 let HeapItem { index, distance: _ } = result;
                 target_index != *index
             }))
-            .for_each(|((tsne::Aligned(idx), tsne::Aligned(d)), result)| {
+            .for_each(|((idx, d), result)| {
                 let HeapItem { index, distance } = result;
-                *idx = *index;
-                *d = *distance;
+                **idx = *index;
+                **d = *distance;
             });
     }
 }

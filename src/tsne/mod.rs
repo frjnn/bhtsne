@@ -3,8 +3,10 @@ pub(super) mod vptree;
 
 use std::{
     iter::Sum,
-    ops::{Add, AddAssign, Deref, DerefMut, DivAssign, MulAssign, SubAssign},
+    ops::{Add, AddAssign, DivAssign, MulAssign, SubAssign},
 };
+
+use crossbeam::utils::CachePadded;
 
 use rayon::{
     iter::{
@@ -17,46 +19,6 @@ use rayon::{
 use rand_distr::{Distribution, Normal};
 
 use num_traits::{AsPrimitive, Float};
-
-/// Cache aligned scalar. It's used to prevent false sharing.
-#[repr(align(64))]
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Aligned<T>(pub(super) T)
-where
-    T: Send + Sync + Copy;
-
-impl<T> Deref for Aligned<T>
-where
-    T: Send + Sync + Copy,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for Aligned<T>
-where
-    T: Send + Sync + Copy,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<T> From<T> for Aligned<T>
-where
-    T: Send + Sync + Copy,
-{
-    fn from(scalar: T) -> Self {
-        Self(scalar)
-    }
-}
-
-// Obviously safe.
-unsafe impl<T: Send + Sync + Copy> Send for Aligned<T> {}
-unsafe impl<T: Send + Sync + Copy> Sync for Aligned<T> {}
 
 /// Checks whether the perplexity is too large for the number of samples.
 ///
@@ -87,10 +49,10 @@ pub(super) fn check_perplexity<T: Float + AsPrimitive<usize>>(perplexity: &T, n_
 ///
 /// * `gains` - gains.
 pub(super) fn prepare_buffers<T: Float + Send + Sync>(
-    y: &mut Vec<Aligned<T>>,
-    dy: &mut Vec<Aligned<T>>,
-    uy: &mut Vec<Aligned<T>>,
-    gains: &mut Vec<Aligned<T>>,
+    y: &mut Vec<CachePadded<T>>,
+    dy: &mut Vec<CachePadded<T>>,
+    uy: &mut Vec<CachePadded<T>>,
+    gains: &mut Vec<CachePadded<T>>,
     grad_entries: usize,
 ) {
     // Prepares the buffers.
@@ -113,9 +75,9 @@ pub(super) fn prepare_buffers<T: Float + Send + Sync>(
 ///
 /// * `gains` - gains.
 pub(super) fn clear_buffers<T: Float + Send + Sync>(
-    dy: &mut Vec<Aligned<T>>,
-    uy: &mut Vec<Aligned<T>>,
-    gains: &mut Vec<Aligned<T>>,
+    dy: &mut Vec<CachePadded<T>>,
+    uy: &mut Vec<CachePadded<T>>,
+    gains: &mut Vec<CachePadded<T>>,
 ) {
     // Empties the buffers.
     *dy = Vec::new(); // Gradient.
@@ -128,11 +90,11 @@ pub(super) fn clear_buffers<T: Float + Send + Sync>(
 /// # Arguments
 ///
 /// `y` - embedding.
-pub(super) fn random_init<T: Float + Send + Sync + Copy>(y: &mut [Aligned<T>]) {
+pub(super) fn random_init<T: Float + Send + Sync + Copy>(y: &mut [CachePadded<T>]) {
     let distr = Normal::new(0.0, 1e-4).unwrap();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     y.iter_mut()
-        .for_each(|Aligned(el)| *el = T::from(distr.sample(&mut rng)).unwrap());
+        .for_each(|el| **el = T::from(distr.sample(&mut rng)).unwrap());
 }
 
 /// Computes a squared distance matrix. Computes only the upper triangular entries, excluding the
@@ -148,7 +110,7 @@ pub(super) fn random_init<T: Float + Send + Sync + Copy>(y: &mut [Aligned<T>]) {
 ///
 /// * `n_samples` - total number of samples.
 pub(super) fn compute_pairwise_distance_matrix<'a, T, U, F, G>(
-    distances: &mut [Aligned<T>],
+    distances: &mut [CachePadded<T>],
     f: F,
     g: G,
     n_samples: usize,
@@ -169,8 +131,8 @@ pub(super) fn compute_pairwise_distance_matrix<'a, T, U, F, G>(
             (row_index, column_index, d)
         })
         .filter(|(row_index, column_index, _)| row_index < column_index)
-        .for_each(|(i, j, Aligned(d))| {
-            *d = f(g(&i), g(&j));
+        .for_each(|(i, j, d)| {
+            **d = f(g(&i), g(&j));
         });
 
     // Symmetrizes the matrix. Effectively filling it.
@@ -192,8 +154,8 @@ pub(super) fn compute_pairwise_distance_matrix<'a, T, U, F, G>(
 ///
 /// * `perplexity` - given perplexity value.
 pub(super) fn search_beta<T>(
-    p_values_row: &mut [Aligned<T>],
-    distances_row: &[Aligned<T>],
+    p_values_row: &mut [CachePadded<T>],
+    distances_row: &[CachePadded<T>],
     perplexity: &T,
 ) where
     T: Send + Sync + Copy + Float + Sum + MulAssign + DivAssign,
@@ -216,22 +178,19 @@ pub(super) fn search_beta<T>(
         p_values_row
             .iter_mut()
             .zip(distances_row.iter())
-            .for_each(|(Aligned(p), Aligned(d))| {
-                *p = (-beta * d.powi(2)).exp();
+            .for_each(|(p, d)| {
+                **p = (-beta * d.powi(2)).exp();
             });
 
         // After that the row is normalized.
-        p_values_row_sum =
-            p_values_row.iter().map(|Aligned(el)| *el).sum::<T>() + T::min_positive_value();
+        p_values_row_sum = p_values_row.iter().map(|el| **el).sum::<T>() + T::min_positive_value();
 
         // The conditional distribution's entropy is needed to find the optimal value
         // for beta, i.e. the bandwidth of the Gaussian kernel.
         let mut entropy = p_values_row
             .iter()
             .zip(distances_row.iter())
-            .fold(T::zero(), |acc, (Aligned(p), Aligned(d))| {
-                acc + beta * *p * d.powi(2)
-            });
+            .fold(T::zero(), |acc, (p, d)| acc + beta * **p * d.powi(2));
         entropy = entropy / p_values_row_sum + p_values_row_sum.ln();
 
         // It evaluates whether the entropy is within the tolerance level.
@@ -277,7 +236,7 @@ pub(super) fn search_beta<T>(
     // Row normalization.
     p_values_row
         .iter_mut()
-        .for_each(|Aligned(p)| *p /= p_values_row_sum + T::epsilon());
+        .for_each(|p| **p /= p_values_row_sum + T::epsilon());
 }
 
 /// Normalizes the P values.
@@ -286,13 +245,13 @@ pub(super) fn search_beta<T>(
 ///
 /// `p_values` - values of the P distribution.
 pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign + Sum>(
-    p_values: &mut [Aligned<T>],
+    p_values: &mut [CachePadded<T>],
 ) {
-    let p_values_sum: T = p_values.par_iter().map(|Aligned(p)| *p).sum();
+    let p_values_sum: T = p_values.par_iter().map(|p| **p).sum();
     let twelve = T::from(12.0).unwrap();
-    p_values.par_iter_mut().for_each(|Aligned(p)| {
-        *p /= p_values_sum + T::epsilon();
-        *p *= twelve;
+    p_values.par_iter_mut().for_each(|p| {
+        **p /= p_values_sum + T::epsilon();
+        **p *= twelve;
     });
 }
 
@@ -310,8 +269,8 @@ pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign 
 pub(super) fn symmetrize_sparse_matrix<T>(
     sym_p_rows: &mut Vec<usize>,
     sym_p_columns: &mut Vec<usize>,
-    p_columns: Vec<Aligned<usize>>,
-    p_values: &mut Vec<Aligned<T>>,
+    p_columns: Vec<CachePadded<usize>>,
+    p_values: &mut Vec<CachePadded<T>>,
     n_samples: usize,
     n_neighbors: &usize,
 ) where
@@ -326,12 +285,12 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     // Recall that each i-th row corresponds to the joint distribution of the i-th sample.
     let p_rows = |i| (i * n_neighbors);
 
-    for _n in 0..n_samples {
-        for i in p_rows(_n)..p_rows(_n + 1) {
-            row_counts[_n] += 1;
+    for n in 0..n_samples {
+        for i in p_rows(n)..p_rows(n + 1) {
+            row_counts[n] += 1;
             if !p_columns[p_rows(*p_columns[i])..p_rows(*p_columns[i] + 1)]
                 .iter()
-                .any(|Aligned(el)| *el == _n)
+                .any(|el| **el == n)
             {
                 row_counts[*p_columns[i]] += 1;
             }
@@ -342,7 +301,7 @@ pub(super) fn symmetrize_sparse_matrix<T>(
 
     let mut sym_row_p: Vec<usize> = vec![0; n_samples + 1];
     let mut sym_col_p: Vec<usize> = vec![0; total];
-    let mut sym_val_p: Vec<Aligned<T>> = vec![T::zero().into(); total];
+    let mut sym_val_p: Vec<CachePadded<T>> = vec![T::zero().into(); total];
 
     sym_row_p[0] = 0;
     for _n in 0..n_samples {
@@ -388,9 +347,7 @@ pub(super) fn symmetrize_sparse_matrix<T>(
 
     // Divide result by two.
     let zero_point_five = T::from(0.5).unwrap();
-    sym_val_p
-        .iter_mut()
-        .for_each(|Aligned(p)| *p *= zero_point_five);
+    sym_val_p.iter_mut().for_each(|p| **p *= zero_point_five);
 
     *p_values = sym_val_p;
     *sym_p_rows = sym_row_p;
@@ -413,10 +370,10 @@ pub(super) fn symmetrize_sparse_matrix<T>(
 ///
 /// * `momentum` - momentum coefficient.
 pub(super) fn update_solution<T>(
-    y: &mut [Aligned<T>],
-    dy: &[Aligned<T>],
-    uy: &mut [Aligned<T>],
-    gains: &mut [Aligned<T>],
+    y: &mut [CachePadded<T>],
+    dy: &[CachePadded<T>],
+    uy: &mut [CachePadded<T>],
+    gains: &mut [CachePadded<T>],
     learning_rate: &T,
     momentum: &T,
 ) where
@@ -430,20 +387,18 @@ pub(super) fn update_solution<T>(
         .zip(dy.par_iter())
         .zip(uy.par_iter_mut())
         .zip(gains.par_iter_mut())
-        .for_each(
-            |(((Aligned(y_el), Aligned(dy_el)), Aligned(uy_el)), Aligned(gains_el))| {
-                *gains_el = if dy_el.signum() != uy_el.signum() {
-                    *gains_el + zero_point_two
-                } else {
-                    *gains_el * zero_point_eight
-                };
-                if *gains_el < zero_point_zero_one {
-                    *gains_el = zero_point_zero_one;
-                }
-                *uy_el = *momentum * *uy_el - *learning_rate * *gains_el * *dy_el;
-                *y_el += *uy_el
-            },
-        );
+        .for_each(|(((y_el, dy_el), uy_el), gains_el)| {
+            **gains_el = if dy_el.signum() != uy_el.signum() {
+                **gains_el + zero_point_two
+            } else {
+                **gains_el * zero_point_eight
+            };
+            if **gains_el < zero_point_zero_one {
+                **gains_el = zero_point_zero_one;
+            }
+            **uy_el = *momentum * **uy_el - *learning_rate * **gains_el * **dy_el;
+            **y_el += **uy_el
+        });
 }
 
 /// Adjust the P distribution values to the original ones in parallel.
@@ -451,9 +406,9 @@ pub(super) fn update_solution<T>(
 /// # Arguments
 ///
 /// `p_values` - P distribution.
-pub(super) fn stop_lying<T: Float + Send + Sync + DivAssign>(p_values: &mut [Aligned<T>]) {
+pub(super) fn stop_lying<T: Float + Send + Sync + DivAssign>(p_values: &mut [CachePadded<T>]) {
     let twelve = T::from(12.0).unwrap();
-    p_values.par_iter_mut().for_each(|Aligned(p)| *p /= twelve);
+    p_values.par_iter_mut().for_each(|p| **p /= twelve);
 }
 
 /// Makes the solution zero mean. The embedded samples are taken in chunks of size
@@ -473,7 +428,7 @@ pub(super) fn stop_lying<T: Float + Send + Sync + DivAssign>(p_values: &mut [Ali
 /// * `embedding_dim`- dimensionality of the embedding space.
 pub(super) fn zero_mean<T>(
     means: &mut [T],
-    y: &mut [Aligned<T>],
+    y: &mut [CachePadded<T>],
     n_samples: usize,
     embedding_dim: usize,
 ) where
@@ -484,7 +439,7 @@ pub(super) fn zero_mean<T>(
         means
             .iter_mut()
             .zip(embedded_sample.iter())
-            .for_each(|(mean, Aligned(el))| *mean += *el);
+            .for_each(|(mean, el)| *mean += **el);
     });
 
     let n_samples = T::from(n_samples).unwrap();
@@ -494,7 +449,7 @@ pub(super) fn zero_mean<T>(
         embedded_sample
             .iter_mut()
             .zip(means.iter())
-            .for_each(|(Aligned(el), mean)| *el -= *mean);
+            .for_each(|(el, mean)| **el -= *mean);
     });
 
     // Zeroes the mean buffer.
@@ -514,35 +469,35 @@ pub(super) fn zero_mean<T>(
 /// * `embedding_dim` - dimensionality of the embedding space.
 #[cfg(test)]
 pub(crate) fn evaluate_error<T>(
-    p_values: &[Aligned<T>],
-    y: &[Aligned<T>],
+    p_values: &[CachePadded<T>],
+    y: &[CachePadded<T>],
     n_samples: usize,
     embedding_dim: usize,
 ) -> T
 where
     T: Float + Send + Sync + AddAssign + Add + DivAssign + Sum,
 {
-    let mut distances: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * n_samples];
+    let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples * n_samples];
     compute_pairwise_distance_matrix(
         &mut distances,
-        |a: &[Aligned<T>], b: &[Aligned<T>]| {
+        |a: &[CachePadded<T>], b: &[CachePadded<T>]| {
             a.iter()
                 .zip(b.iter())
-                .map(|(Aligned(aa), Aligned(bb))| (*aa - *bb).powi(2))
+                .map(|(aa, bb)| (**aa - **bb).powi(2))
                 .sum::<T>()
         },
         |i| &y[i * embedding_dim..(i + 1) * embedding_dim],
         n_samples,
     );
 
-    let mut q_values: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * n_samples];
+    let mut q_values: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples * n_samples];
     q_values
         .par_iter_mut()
         .zip(distances.par_iter())
-        .for_each(|(Aligned(q), Aligned(d))| *q = T::one() / (T::one() + *d));
+        .for_each(|(q, d)| **q = T::one() / (T::one() + **d));
 
-    let q_sum = q_values.par_iter().map(|Aligned(q)| *q).sum::<T>();
-    q_values.par_iter_mut().for_each(|Aligned(q)| *q /= q_sum);
+    let q_sum = q_values.par_iter().map(|q| **q).sum::<T>();
+    q_values.par_iter_mut().for_each(|q| **q /= q_sum);
 
     // Kullback-Leibler divergence.
     p_values
@@ -550,8 +505,8 @@ where
         .zip(q_values.par_iter())
         .fold(
             || T::zero(),
-            |c, (Aligned(p), Aligned(q))| {
-                c + *p * ((*p + T::min_positive_value()) / (*q + T::min_positive_value())).ln()
+            |c, (p, q)| {
+                c + **p * ((**p + T::min_positive_value()) / (**q + T::min_positive_value())).ln()
             },
         )
         .sum::<T>()
@@ -578,8 +533,8 @@ where
 pub(crate) fn evaluate_error_approximately<T>(
     p_rows: &[usize],
     p_columns: &[usize],
-    p_values: &[Aligned<T>],
-    y: &[Aligned<T>],
+    p_values: &[CachePadded<T>],
+    y: &[CachePadded<T>],
     n_samples: usize,
     embedding_dim: usize,
     theta: T,
@@ -590,10 +545,10 @@ where
     // Get estimate of normalization term.
     let q_sum = {
         let tree = sptree::SPTree::new(embedding_dim, y, n_samples);
-        let mut q_sums: Vec<Aligned<T>> = vec![T::zero().into(); n_samples];
+        let mut q_sums: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples];
 
-        let mut buffer: Vec<Aligned<T>> = vec![T::zero().into(); n_samples * embedding_dim];
-        let mut negative_forces: Vec<Aligned<T>> =
+        let mut buffer: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples * embedding_dim];
+        let mut negative_forces: Vec<CachePadded<T>> =
             vec![T::zero().into(); n_samples * embedding_dim];
 
         q_sums
@@ -605,15 +560,15 @@ where
                 tree.compute_non_edge_forces(index, theta, negative_forces_row, buffer_row, sum);
             });
 
-        q_sums.par_iter().map(|Aligned(sum)| *sum).sum::<T>()
+        q_sums.par_iter().map(|sum| **sum).sum::<T>()
     };
 
-    let mut partials: Vec<Aligned<T>> = vec![T::zero().into(); n_samples];
+    let mut partials: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples];
 
     partials
         .par_iter_mut()
         .enumerate()
-        .for_each(|(index, Aligned(cost))| {
+        .for_each(|(index, cost)| {
             let sample_a = &y[index * embedding_dim..(index + 1) * embedding_dim];
             for n in p_rows[index]..p_rows[index + 1] {
                 let sample_b = &y[p_columns[n] * embedding_dim..(p_columns[n] + 1) * embedding_dim];
@@ -621,20 +576,17 @@ where
                 let mut q = sample_a
                     .iter()
                     .zip(sample_b.iter())
-                    .map(|(Aligned(a), Aligned(b))| (*a - *b).powi(2))
+                    .map(|(a, b)| (**a - **b).powi(2))
                     .sum::<T>();
                 q = (T::one() / (T::one() + q)) / q_sum;
 
                 // Kullback-Leibler divergence.
-                *cost += *p_values[index]
+                **cost += *p_values[index]
                     * ((*p_values[index] + T::min_positive_value())
                         / (q + T::min_positive_value()))
                     .ln();
             }
         });
 
-    partials
-        .par_iter()
-        .map(|Aligned(partial)| *partial)
-        .sum::<T>()
+    partials.par_iter().map(|partial| **partial).sum::<T>()
 }

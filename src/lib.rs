@@ -64,6 +64,10 @@ use std::{
 #[cfg(feature = "csv")]
 use std::{error::Error, fs::File};
 
+use num_traits::{Float, cast::AsPrimitive};
+
+use crossbeam::utils::CachePadded;
+
 use rayon::{
     iter::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
@@ -71,8 +75,6 @@ use rayon::{
     },
     slice::{ParallelSlice, ParallelSliceMut},
 };
-
-use num_traits::{cast::AsPrimitive, Float};
 
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
@@ -91,14 +93,14 @@ where
     stop_lying_epoch: usize,
     embedding_dim: u8,
     perplexity: T,
-    p_values: Vec<tsne::Aligned<T>>,
+    p_values: Vec<CachePadded<T>>,
     p_rows: Vec<usize>,
     p_columns: Vec<usize>,
-    q_values: Vec<tsne::Aligned<T>>,
-    y: Vec<tsne::Aligned<T>>,
-    dy: Vec<tsne::Aligned<T>>,
-    uy: Vec<tsne::Aligned<T>>,
-    gains: Vec<tsne::Aligned<T>>,
+    q_values: Vec<CachePadded<T>>,
+    y: Vec<CachePadded<T>>,
+    dy: Vec<CachePadded<T>>,
+    uy: Vec<CachePadded<T>>,
+    gains: Vec<CachePadded<T>>,
 }
 
 impl<'data, T, U> tSNE<'data, T, U>
@@ -281,7 +283,7 @@ where
 
     /// Returns the computed embedding.
     pub fn embedding(&self) -> Vec<T> {
-        self.y.iter().map(|tsne::Aligned(x)| *x).collect()
+        self.y.iter().map(|x| **x).collect()
     }
 
     /// Performs a parallel exact version of the t-SNE algorithm. Pairwise distances between samples
@@ -320,7 +322,7 @@ where
         self.q_values.resize(pairwise_entries, T::zero().into()); // Q.
 
         // Alignment prevents false sharing.
-        let mut distances: Vec<tsne::Aligned<T>> = vec![T::zero().into(); pairwise_entries];
+        let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); pairwise_entries];
         // Zeroes the diagonal entries. The distances vector is recycled but the elements
         // corresponding to the diagonal entries of the distance matrix are always kept to 0. and
         // never written on. This hold as an invariant through all the algorithm.
@@ -376,7 +378,7 @@ where
             // Compute pairwise squared euclidean distances between embeddings in parallel.
             tsne::compute_pairwise_distance_matrix(
                 &mut distances,
-                |ith: &[tsne::Aligned<T>], jth: &[tsne::Aligned<T>]| {
+                |ith: &[CachePadded<T>], jth: &[CachePadded<T>]| {
                     ith.iter()
                         .zip(jth.iter())
                         .map(|(&i, &j)| (*i - *j).powi(2))
@@ -390,7 +392,7 @@ where
             self.q_values
                 .par_iter_mut()
                 .zip(distances.par_iter())
-                .for_each(|(tsne::Aligned(q), tsne::Aligned(d))| *q = T::one() / (T::one() + *d));
+                .for_each(|(q, d)| **q = T::one() / (T::one() + **d));
 
             // Computes the exact gradient in parallel.
             let q_values_sum: T = self.q_values.par_iter().map(|&q| *q).sum();
@@ -415,8 +417,8 @@ where
                                     .iter_mut()
                                     .zip(y_sample.iter())
                                     .zip(other_sample.iter())
-                                    .for_each(|((tsne::Aligned(dy_el), &y_el), &other_el)| {
-                                        *dy_el += (*y_el - *other_el) * m
+                                    .for_each(|((dy_el, &y_el), &other_el)| {
+                                        **dy_el += (*y_el - *other_el) * m
                                     });
                             });
                     },
@@ -433,9 +435,7 @@ where
             );
 
             // Zeroes the gradient.
-            self.dy
-                .iter_mut()
-                .for_each(|tsne::Aligned(el)| *el = T::zero());
+            self.dy.iter_mut().for_each(|el| **el = T::zero());
 
             // Make solution zero mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
@@ -512,12 +512,12 @@ where
         // an the elements of p_values: for each row i of length n_neighbors of such matrices it
         // holds that p_columns[i][j] corresponds to the index sample which contributes
         // to p_values[i][j]. This vector is freed inside symmetrize_sparse_matrix.
-        let mut p_columns: Vec<tsne::Aligned<usize>> = vec![0.into(); pairwise_entries];
+        let mut p_columns: Vec<CachePadded<usize>> = vec![0.into(); pairwise_entries];
 
         // Computes sparse input similarities using a vantage point tree.
         {
             // Distances buffer.
-            let mut distances: Vec<tsne::Aligned<T>> = vec![T::zero().into(); pairwise_entries];
+            let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); pairwise_entries];
 
             // Build ball tree on data set. The tree is freed at the end of the scope.
             let tree = tsne::vptree::VPTree::new(data, &metric_f);
@@ -567,10 +567,10 @@ where
         tsne::random_init(&mut self.y);
 
         // Prepares buffers for Barnes-Hut algorithm.
-        let mut positive_forces: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
-        let mut negative_forces: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
-        let mut forces_buffer: Vec<tsne::Aligned<T>> = vec![T::zero().into(); grad_entries];
-        let mut q_sums: Vec<tsne::Aligned<T>> = vec![T::zero().into(); n_samples];
+        let mut positive_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
+        let mut negative_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
+        let mut forces_buffer: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
+        let mut q_sums: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples];
 
         // Vector used to store the mean values for each embedding dimension. It's used
         // to make the solution zero mean.
@@ -628,22 +628,18 @@ where
 
             // Compute final Barnes-Hut t-SNE gradient approximation.
             // Reduces partial sums of Q distribution.
-            let q_sum: T = q_sums.par_iter_mut().map(|sum| sum.0).sum();
+            let q_sum: T = q_sums.par_iter_mut().map(|sum| **sum).sum();
             self.dy
                 .par_iter_mut()
                 .zip(positive_forces.par_iter_mut())
                 .zip(negative_forces.par_iter_mut())
-                .for_each(
-                    |((tsne::Aligned(grad), tsne::Aligned(pf)), tsne::Aligned(nf))| {
-                        *grad = *pf - (*nf / q_sum);
-                        *pf = T::zero();
-                        *nf = T::zero();
-                    },
-                );
+                .for_each(|((grad, pf), nf)| {
+                    **grad = **pf - (**nf / q_sum);
+                    **pf = T::zero();
+                    **nf = T::zero();
+                });
             // Zeroes Q-sums.
-            q_sums
-                .iter_mut()
-                .for_each(|tsne::Aligned(sum)| *sum = T::zero());
+            q_sums.iter_mut().for_each(|sum| **sum = T::zero());
 
             // Updates the embedding in parallel with gradient descent.
             tsne::update_solution(
