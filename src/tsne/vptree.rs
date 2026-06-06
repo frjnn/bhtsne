@@ -121,7 +121,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         F: Fn(&U, &U) -> T,
     {
         let mut stack = vec![VPTreeBuilder::new(&mut self.root, lower, upper)];
-        let mut thread_rng = rand::rng();
+        let mut thread_rng = super::make_rng();
 
         while let Some(builder) = stack.pop() {
             let VPTreeBuilder { root, lower, upper } = builder;
