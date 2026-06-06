@@ -276,7 +276,7 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     // has possibly less entries than the current buffer p_values. In order to construct such a
     // sparse representation, the number of elements contained in each row is needed.
     // Recall that each i-th row corresponds to the joint distribution of the i-th sample.
-    let p_rows = |i| (i * n_neighbors);
+    let p_rows = |i| i * n_neighbors;
 
     for n in 0..n_samples {
         for i in p_rows(n)..p_rows(n + 1) {

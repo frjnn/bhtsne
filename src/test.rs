@@ -1,5 +1,6 @@
-use super::{tSNE, tsne};
 use crossbeam::utils::CachePadded;
+
+use super::{tSNE, tsne};
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
