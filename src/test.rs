@@ -65,6 +65,13 @@ fn set_perplexity() {
 }
 
 #[test]
+fn set_epoch_callback() {
+    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    tsne.epoch_callback(|_epoch, _embedding| {});
+    assert!(tsne.epoch_callback.is_some());
+}
+
+#[test]
 #[ignore = "requires iris dataset"]
 fn exact_tsne() {
     let data: Vec<f32> =
@@ -137,6 +144,106 @@ fn barnes_hut_tsne() {
             THETA
         ) < 5.0
     );
+}
+
+/// The epoch callback must be invoked once per epoch, in order, with a snapshot
+/// of the embedding whose final value matches the result of `embedding`, and it
+/// must survive the fitting so that subsequent runs can reuse it.
+#[test]
+fn epoch_callback_reports_each_barnes_hut_epoch() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+    const RUN_EPOCHS: usize = 100;
+
+    // Deterministic LCG so the test needs no RNG dependency.
+    let mut state = 7_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
+    };
+    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut epochs_seen: Vec<usize> = Vec::new();
+    let mut last_snapshot: Vec<f32> = Vec::new();
+
+    let embedding = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(RUN_EPOCHS)
+            .epoch_callback(|epoch, snapshot| {
+                assert_eq!(snapshot.len(), N * NO_DIMS as usize);
+                epochs_seen.push(epoch);
+                last_snapshot.clear();
+                last_snapshot.extend_from_slice(snapshot);
+            })
+            .barnes_hut(THETA, |sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            });
+        // The callback must be put back in place once the fitting is over.
+        assert!(tsne.epoch_callback.is_some());
+        tsne.embedding()
+    };
+
+    assert_eq!(epochs_seen, (0..RUN_EPOCHS).collect::<Vec<usize>>());
+    assert_eq!(last_snapshot, embedding);
+}
+
+/// Same as `epoch_callback_reports_each_barnes_hut_epoch` for the exact version
+/// of the algorithm.
+#[test]
+fn epoch_callback_reports_each_exact_epoch() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+    const RUN_EPOCHS: usize = 50;
+
+    // Deterministic LCG so the test needs no RNG dependency.
+    let mut state = 7_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
+    };
+    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut epochs_seen: Vec<usize> = Vec::new();
+    let mut last_snapshot: Vec<f32> = Vec::new();
+
+    let embedding = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(RUN_EPOCHS)
+            .epoch_callback(|epoch, snapshot| {
+                assert_eq!(snapshot.len(), N * NO_DIMS as usize);
+                epochs_seen.push(epoch);
+                last_snapshot.clear();
+                last_snapshot.extend_from_slice(snapshot);
+            })
+            .exact(|sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum()
+            });
+        // The callback must be put back in place once the fitting is over.
+        assert!(tsne.epoch_callback.is_some());
+        tsne.embedding()
+    };
+
+    assert_eq!(epochs_seen, (0..RUN_EPOCHS).collect::<Vec<usize>>());
+    assert_eq!(last_snapshot, embedding);
 }
 
 /// Regression test for the Gaussian bandwidth binary search.
