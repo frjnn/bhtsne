@@ -169,7 +169,6 @@ pub(super) fn search_beta<T>(
     let mut p_values_row_sum: T = T::zero();
 
     let two = T::from(2.0).unwrap();
-    let zero_point_five = T::from(5.0).unwrap();
 
     debug_assert_eq!(p_values_row.len(), distances_row.len());
 
@@ -211,13 +210,7 @@ pub(super) fn search_beta<T>(
                 max_beta = beta;
 
                 if min_beta == -T::max_value() || min_beta == T::max_value() {
-                    if beta < T::zero() {
-                        beta *= two;
-                    } else if beta <= T::one() {
-                        beta = zero_point_five;
-                    } else {
-                        beta *= zero_point_five;
-                    }
+                    beta /= two;
                 } else {
                     beta = (beta + min_beta) / two;
                 }
