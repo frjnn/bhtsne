@@ -19,14 +19,31 @@ version = "0.5.5"
 
 [features]
 default = ["csv"]
+# On wasm32-unknown-unknown, uses the JavaScript host's crypto.getRandomValues as the
+# entropy source through the wasm_js backend of getrandom. Requires running in a
+# JavaScript environment (browser or Node.js). Without this feature the
+# wasm32-unknown-unknown build falls back to a fixed seed and produces deterministic
+# embeddings. Has no effect on other targets.
+wasm_js = ["dep:getrandom", "rand/thread_rng"]
 
 [dependencies]
 crossbeam = "0.8"
 csv = { version = "1", optional = true }
 num-traits = "0.2"
-rand = "0.9"
 rand_distr = "0.5"
 rayon = "1"
+
+# On wasm32-unknown-unknown there is no OS entropy source, getrandom refuses to compile for
+# that target unless the final binary opts into the JavaScript backend. The thread local
+# generator is therefore replaced by a deterministic small generator, see make_rng.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+rand = "0.9"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
+# Since getrandom 0.3.3 enabling the wasm_js feature is enough to select the JavaScript
+# backend on wasm32-unknown-unknown, no rustflags cfg is needed.
+getrandom = { version = "0.3.3", optional = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 csv = "1.3"

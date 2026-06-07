@@ -85,6 +85,36 @@ pub(super) fn clear_buffers<T: Float + Send + Sync>(
     *gains = Vec::new(); // Gains.
 }
 
+/// Returns the source of randomness used by the crate. On targets where an entropy
+/// source is available this is the thread local generator. This includes
+/// wasm32-unknown-unknown when the wasm_js feature is enabled, in which case entropy
+/// comes from the JavaScript host through getrandom. Otherwise, on
+/// wasm32-unknown-unknown no entropy source exists, so a small deterministic generator
+/// with a fixed seed is used instead.
+#[cfg(any(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "wasm_js"
+))]
+pub(super) fn make_rng() -> impl rand::Rng {
+    rand::rng()
+}
+
+/// Returns the source of randomness used by the crate. On targets where an entropy
+/// source is available this is the thread local generator. This includes
+/// wasm32-unknown-unknown when the wasm_js feature is enabled, in which case entropy
+/// comes from the JavaScript host through getrandom. Otherwise, on
+/// wasm32-unknown-unknown no entropy source exists, so a small deterministic generator
+/// with a fixed seed is used instead.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_os = "unknown",
+    not(feature = "wasm_js")
+))]
+pub(super) fn make_rng() -> impl rand::Rng {
+    use rand::SeedableRng;
+    rand::rngs::SmallRng::seed_from_u64(0x6268_7473_6e65)
+}
+
 /// Random initializes the embedding sampling from a normal distribution with mean 0 and sigma 1e-4.
 ///
 /// # Arguments
@@ -92,7 +122,7 @@ pub(super) fn clear_buffers<T: Float + Send + Sync>(
 /// `y` - embedding.
 pub(super) fn random_init<T: Float + Send + Sync + Copy>(y: &mut [CachePadded<T>]) {
     let distr = Normal::new(0.0, 1e-4).unwrap();
-    let mut rng = rand::rng();
+    let mut rng = make_rng();
     y.iter_mut()
         .for_each(|el| **el = T::from(distr.sample(&mut rng)).unwrap());
 }
