@@ -72,6 +72,13 @@ fn set_epoch_callback() {
 }
 
 #[test]
+fn set_initial_embedding() {
+    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    tsne.initial_embedding([1., 2.]);
+    assert_eq!(tsne.initial_embedding, Some(vec![1., 2.]));
+}
+
+#[test]
 #[ignore = "requires iris dataset"]
 fn exact_tsne() {
     let data: Vec<f32> =
@@ -244,6 +251,427 @@ fn epoch_callback_reports_each_exact_epoch() {
 
     assert_eq!(epochs_seen, (0..RUN_EPOCHS).collect::<Vec<usize>>());
     assert_eq!(last_snapshot, embedding);
+}
+
+/// A warm started fit must begin from the supplied embedding: the first epoch
+/// stays close to the seed, far closer than a random init near the origin would.
+#[test]
+fn warm_start_begins_from_initial_embedding_barnes_hut() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // A plausible layout to continue from.
+    let seed = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(300)
+            .barnes_hut(THETA, |sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            });
+        tsne.embedding()
+    };
+
+    let mut first_snapshot: Vec<f32> = Vec::new();
+    {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(5)
+            .stop_lying_epoch(0)
+            .momentum_switch_epoch(0)
+            .initial_embedding(&seed[..])
+            .epoch_callback(|epoch, snapshot| {
+                if epoch == 0 {
+                    first_snapshot.extend_from_slice(snapshot);
+                }
+            })
+            .barnes_hut(THETA, |sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            });
+    }
+
+    let dim = NO_DIMS as usize;
+    let displacement = mean_point_distance(&first_snapshot, &seed, dim);
+    let diagonal = bounding_box_diagonal(&seed, dim);
+    assert!(
+        displacement < 0.05 * diagonal,
+        "first epoch strayed {displacement} from the seed, its bounding box diagonal is {diagonal}"
+    );
+
+    // A random initialization concentrates every point around the origin, so
+    // its mean displacement from the seed is the mean seed point norm.
+    let origin = vec![0.0_f32; seed.len()];
+    let random_displacement = mean_point_distance(&origin, &seed, dim);
+    assert!(
+        random_displacement > 10.0 * displacement,
+        "warm start indistinguishable from a random initialization: {displacement} against {random_displacement}"
+    );
+}
+
+/// Same as `warm_start_begins_from_initial_embedding_barnes_hut` for the exact
+/// version of the algorithm.
+#[test]
+fn warm_start_begins_from_initial_embedding_exact() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // A plausible layout to continue from.
+    let seed = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(300)
+            .exact(|sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum()
+            });
+        tsne.embedding()
+    };
+
+    let mut first_snapshot: Vec<f32> = Vec::new();
+    {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(5)
+            .stop_lying_epoch(0)
+            .momentum_switch_epoch(0)
+            .initial_embedding(&seed[..])
+            .epoch_callback(|epoch, snapshot| {
+                if epoch == 0 {
+                    first_snapshot.extend_from_slice(snapshot);
+                }
+            })
+            .exact(|sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum()
+            });
+    }
+
+    let dim = NO_DIMS as usize;
+    let displacement = mean_point_distance(&first_snapshot, &seed, dim);
+    let diagonal = bounding_box_diagonal(&seed, dim);
+    assert!(
+        displacement < 0.05 * diagonal,
+        "first epoch strayed {displacement} from the seed, its bounding box diagonal is {diagonal}"
+    );
+
+    // A random initialization concentrates every point around the origin, so
+    // its mean displacement from the seed is the mean seed point norm.
+    let origin = vec![0.0_f32; seed.len()];
+    let random_displacement = mean_point_distance(&origin, &seed, dim);
+    assert!(
+        random_displacement > 10.0 * displacement,
+        "warm start indistinguishable from a random initialization: {displacement} against {random_displacement}"
+    );
+}
+
+/// The Barnes-Hut fit must reject a seed whose length does not match
+/// `n_samples * embedding_dim`.
+#[test]
+#[should_panic(expected = "initial embedding has")]
+fn warm_start_rejects_wrong_length_barnes_hut() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(1)
+        .initial_embedding([0.0; 7])
+        .barnes_hut(THETA, |sample_a, sample_b| {
+            sample_a
+                .iter()
+                .zip(sample_b.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        });
+}
+
+/// The exact fit carries its own length check, exercise it independently of the
+/// Barnes-Hut one.
+#[test]
+#[should_panic(expected = "initial embedding has")]
+fn warm_start_rejects_wrong_length_exact() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(1)
+        .initial_embedding([0.0; 7])
+        .exact(|sample_a, sample_b| {
+            sample_a
+                .iter()
+                .zip(sample_b.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum()
+        });
+}
+
+/// The seed is consumed by the fit, so a second fit with no new seed falls back
+/// to a random init near the origin rather than reusing the old seed.
+#[test]
+fn warm_start_seed_is_consumed_by_the_fit() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let seed = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(300)
+            .barnes_hut(THETA, |sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            });
+        tsne.embedding()
+    };
+
+    let mut second_run_first_snapshot: Vec<f32> = Vec::new();
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(1)
+        .initial_embedding(&seed[..]);
+
+    // First fit consumes the seed.
+    tsne.barnes_hut(THETA, |sample_a, sample_b| {
+        sample_a
+            .iter()
+            .zip(sample_b.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt()
+    });
+    // The builder slot must be empty again.
+    assert!(tsne.initial_embedding.is_none());
+
+    // Second fit, no new seed: it must random init, not continue from the seed.
+    tsne.epochs(1)
+        .epoch_callback(|epoch, snapshot| {
+            if epoch == 0 {
+                second_run_first_snapshot.extend_from_slice(snapshot);
+            }
+        })
+        .barnes_hut(THETA, |sample_a, sample_b| {
+            sample_a
+                .iter()
+                .zip(sample_b.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        });
+    // The callback keeps a mutable borrow of the snapshot for as long as tsne
+    // lives, drop it so the snapshot can be read.
+    drop(tsne);
+
+    let dim = NO_DIMS as usize;
+    let from_seed = mean_point_distance(&second_run_first_snapshot, &seed, dim);
+    let from_origin = mean_point_distance(&second_run_first_snapshot, &vec![0.0; seed.len()], dim);
+    assert!(
+        from_origin < from_seed,
+        "second run continued from the consumed seed instead of random init: \
+         {from_origin} from origin against {from_seed} from the seed"
+    );
+}
+
+/// A stop lying epoch of zero must mean no early exaggeration at all. Two warm
+/// started single epoch runs, one with the exaggeration off and one with it on,
+/// must take differently sized first steps, since the momentum buffer is zero at
+/// epoch 0 the two differ by the exaggeration factor alone.
+#[test]
+fn stop_lying_epoch_zero_skips_exaggeration_barnes_hut() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // A plausible layout to continue from.
+    let seed = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(300)
+            .barnes_hut(THETA, |sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            });
+        tsne.embedding()
+    };
+
+    let first_step = |stop_lying_epoch: usize| -> f32 {
+        let mut first_snapshot: Vec<f32> = Vec::new();
+        {
+            let mut tsne = tSNE::new(&samples);
+            tsne.embedding_dim(NO_DIMS)
+                .perplexity(PERPLEXITY)
+                .epochs(1)
+                .stop_lying_epoch(stop_lying_epoch)
+                .initial_embedding(&seed[..])
+                .epoch_callback(|_epoch, snapshot| {
+                    first_snapshot.extend_from_slice(snapshot);
+                })
+                .barnes_hut(THETA, |sample_a, sample_b| {
+                    sample_a
+                        .iter()
+                        .zip(sample_b.iter())
+                        .map(|(a, b)| (a - b).powi(2))
+                        .sum::<f32>()
+                        .sqrt()
+                });
+        }
+        mean_point_distance(&first_snapshot, &seed, NO_DIMS as usize)
+    };
+
+    let exaggerated = first_step(1000);
+    let truthful = first_step(0);
+    assert!(
+        truthful < exaggerated / 3.0,
+        "first epoch still exaggerated: moved {truthful} against {exaggerated} with 12x P values"
+    );
+}
+
+/// Same as `stop_lying_epoch_zero_skips_exaggeration_barnes_hut` for the exact
+/// version of the algorithm.
+#[test]
+fn stop_lying_epoch_zero_skips_exaggeration_exact() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // A plausible layout to continue from.
+    let seed = {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(300)
+            .exact(|sample_a, sample_b| {
+                sample_a
+                    .iter()
+                    .zip(sample_b.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum()
+            });
+        tsne.embedding()
+    };
+
+    let first_step = |stop_lying_epoch: usize| -> f32 {
+        let mut first_snapshot: Vec<f32> = Vec::new();
+        {
+            let mut tsne = tSNE::new(&samples);
+            tsne.embedding_dim(NO_DIMS)
+                .perplexity(PERPLEXITY)
+                .epochs(1)
+                .stop_lying_epoch(stop_lying_epoch)
+                .initial_embedding(&seed[..])
+                .epoch_callback(|_epoch, snapshot| {
+                    first_snapshot.extend_from_slice(snapshot);
+                })
+                .exact(|sample_a, sample_b| {
+                    sample_a
+                        .iter()
+                        .zip(sample_b.iter())
+                        .map(|(a, b)| (a - b).powi(2))
+                        .sum()
+                });
+        }
+        mean_point_distance(&first_snapshot, &seed, NO_DIMS as usize)
+    };
+
+    let exaggerated = first_step(1000);
+    let truthful = first_step(0);
+    assert!(
+        truthful < exaggerated / 3.0,
+        "first epoch still exaggerated: moved {truthful} against {exaggerated} with 12x P values"
+    );
+}
+
+/// Deterministic LCG data so the tests need no RNG dependency.
+fn lcg_samples(n: usize, dim: usize, mut state: u64) -> Vec<f32> {
+    let mut data = Vec::with_capacity(n * dim);
+    for _ in 0..n * dim {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        data.push(((state >> 33) as f32 / u32::MAX as f32) - 0.5);
+    }
+    data
+}
+
+/// Mean euclidean distance between corresponding points of two embeddings.
+fn mean_point_distance(a: &[f32], b: &[f32], dim: usize) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let n = a.len() / dim;
+    a.chunks_exact(dim)
+        .zip(b.chunks_exact(dim))
+        .map(|(p, q)| {
+            p.iter()
+                .zip(q.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        })
+        .sum::<f32>()
+        / n as f32
+}
+
+/// Diagonal of the bounding box of an embedding.
+fn bounding_box_diagonal(points: &[f32], dim: usize) -> f32 {
+    (0..dim)
+        .map(|d| {
+            let component = points.iter().skip(d).step_by(dim);
+            let min = component.clone().fold(f32::MAX, |a, &b| a.min(b));
+            let max = component.fold(f32::MIN, |a, &b| a.max(b));
+            (max - min).powi(2)
+        })
+        .sum::<f32>()
+        .sqrt()
 }
 
 /// Regression test for the Gaussian bandwidth binary search.
