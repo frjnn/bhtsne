@@ -26,6 +26,9 @@ default = ["csv"]
 # embeddings. Has no effect on other targets.
 wasm_js = ["dep:getrandom", "rand/thread_rng"]
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 crossbeam = "0.8"
 csv = { version = "1", optional = true }
