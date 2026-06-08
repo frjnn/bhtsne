@@ -15,7 +15,7 @@ license = "MIT"
 name = "bhtsne"
 readme = "README.md"
 repository = "https://github.com/frjnn/bhtsne"
-version = "0.5.5"
+version = "0.5.6"
 
 [features]
 default = ["csv"]
@@ -43,7 +43,10 @@ rayon = "1"
 rand = "0.9"
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
+rand = { version = "0.9", default-features = false, features = [
+    "std",
+    "small_rng",
+] }
 # Since getrandom 0.3.3 enabling the wasm_js feature is enough to select the JavaScript
 # backend on wasm32-unknown-unknown, no rustflags cfg is needed.
 getrandom = { version = "0.3.3", optional = true, features = ["wasm_js"] }
