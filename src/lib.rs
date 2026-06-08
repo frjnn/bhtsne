@@ -76,6 +76,13 @@ use rayon::{
     slice::{ParallelSlice, ParallelSliceMut},
 };
 
+/// Boxed closure invoked at the end of each fitting epoch with the epoch index and a
+/// snapshot of the current embedding. See [`tSNE::epoch_callback`].
+///
+/// The `Send + Sync` bounds only serve to keep [`tSNE`] itself `Send + Sync`, the
+/// callback is only ever invoked sequentially from the fitting thread.
+pub type EpochCallback<'data, T> = Box<dyn FnMut(usize, &[T]) + Send + Sync + 'data>;
+
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
 #[allow(non_camel_case_types)]
@@ -101,6 +108,7 @@ where
     dy: Vec<CachePadded<T>>,
     uy: Vec<CachePadded<T>>,
     gains: Vec<CachePadded<T>>,
+    epoch_callback: Option<EpochCallback<'data, T>>,
 }
 
 impl<'data, T, U> tSNE<'data, T, U>
@@ -183,6 +191,7 @@ where
             dy: Vec::new(),
             uy: Vec::new(),
             gains: Vec::new(),
+            epoch_callback: None,
         }
     }
 
@@ -281,6 +290,54 @@ where
         self
     }
 
+    /// Sets a callback invoked at the end of each fitting epoch by both [`exact`]
+    /// and [`barnes_hut`].
+    ///
+    /// # Arguments
+    ///
+    /// `callback` - closure called with the zero-based epoch index and a snapshot of
+    /// the current embedding, laid out as in the result of [`embedding`]. It can be
+    /// used to monitor convergence or to animate intermediate embeddings.
+    ///
+    /// The callback is invoked sequentially from the calling thread once per epoch.
+    /// To observe progress more sparsely simply return early from the closure for
+    /// the epochs to skip.
+    ///
+    /// The `Send + Sync` bounds only serve to keep [`tSNE`] itself `Send + Sync`.
+    /// On single threaded targets, such as wasm, closures over non `Send` resources
+    /// can be made compatible with a wrapper like the `send_wrapper` crate.
+    ///
+    /// [`exact`]: tSNE::exact
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    /// [`embedding`]: tSNE::embedding
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bhtsne::tSNE;
+    ///
+    /// const N: usize = 100;
+    /// const D: usize = 25;
+    ///
+    /// let data: Vec<f32> = vec![0.0_f32; N * D];
+    /// let vectors: Vec<&[f32]> = data.chunks(D).collect();
+    ///
+    /// let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&vectors);
+    /// tsne.epoch_callback(|epoch, embedding| {
+    ///     if epoch % 10 == 0 {
+    ///         println!("epoch {}: {} coordinates", epoch, embedding.len());
+    ///     }
+    /// });
+    /// ```
+    pub fn epoch_callback<C>(&mut self, callback: C) -> &mut Self
+    where
+        C: FnMut(usize, &[T]) + Send + Sync + 'data,
+    {
+        self.epoch_callback = Some(Box::new(callback));
+
+        self
+    }
+
     /// Returns the computed embedding.
     pub fn embedding(&self) -> Vec<T> {
         self.y.iter().map(|x| **x).collect()
@@ -373,6 +430,15 @@ where
         // to make the solution zero mean.
         let mut means: Vec<T> = vec![T::zero(); embedding_dim];
 
+        // The callback is moved out of self so that the epoch loop is free to borrow
+        // the other fields mutably. It is put back at the end of the fitting.
+        let mut epoch_callback = self.epoch_callback.take();
+        // Scratch buffer for the embedding snapshots passed to the callback.
+        let mut snapshot: Vec<T> = match epoch_callback {
+            Some(_) => vec![T::zero(); grad_entries],
+            None => Vec::new(),
+        };
+
         // Main fitting loop.
         for epoch in 0..self.epochs {
             // Compute pairwise squared euclidean distances between embeddings in parallel.
@@ -449,7 +515,18 @@ where
             if epoch == self.momentum_switch_epoch {
                 self.momentum = self.final_momentum;
             }
+
+            // Reports the embedding at the end of the epoch.
+            if let Some(callback) = epoch_callback.as_mut() {
+                snapshot
+                    .iter_mut()
+                    .zip(self.y.iter())
+                    .for_each(|(dst, src)| *dst = **src);
+                callback(epoch, &snapshot);
+            }
         }
+        // Puts the callback back in place.
+        self.epoch_callback = epoch_callback;
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
 
@@ -576,6 +653,15 @@ where
         // to make the solution zero mean.
         let mut means: Vec<T> = vec![T::zero(); embedding_dim];
 
+        // The callback is moved out of self so that the epoch loop is free to borrow
+        // the other fields mutably. It is put back at the end of the fitting.
+        let mut epoch_callback = self.epoch_callback.take();
+        // Scratch buffer for the embedding snapshots passed to the callback.
+        let mut snapshot: Vec<T> = match epoch_callback {
+            Some(_) => vec![T::zero(); grad_entries],
+            None => Vec::new(),
+        };
+
         // Main Training loop.
         for epoch in 0..self.epochs {
             {
@@ -663,7 +749,18 @@ where
             if epoch == self.momentum_switch_epoch {
                 self.momentum = self.final_momentum;
             }
+
+            // Reports the embedding at the end of the epoch.
+            if let Some(callback) = epoch_callback.as_mut() {
+                snapshot
+                    .iter_mut()
+                    .zip(self.y.iter())
+                    .for_each(|(dst, src)| *dst = **src);
+                callback(epoch, &snapshot);
+            }
         }
+        // Puts the callback back in place.
+        self.epoch_callback = epoch_callback;
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
 
