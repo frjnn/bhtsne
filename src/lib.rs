@@ -109,6 +109,7 @@ where
     uy: Vec<CachePadded<T>>,
     gains: Vec<CachePadded<T>>,
     epoch_callback: Option<EpochCallback<'data, T>>,
+    initial_embedding: Option<Vec<T>>,
 }
 
 impl<'data, T, U> tSNE<'data, T, U>
@@ -192,6 +193,7 @@ where
             uy: Vec::new(),
             gains: Vec::new(),
             epoch_callback: None,
+            initial_embedding: None,
         }
     }
 
@@ -254,6 +256,9 @@ where
     /// Sets a new stop lying epoch, i.e. the epoch after which the P distribution values become
     /// true, as defined in the original implementation. For epochs < `stop_lying_epoch` the values
     /// of the P distribution are multiplied by a factor equal to `12.0`.
+    ///
+    /// A value of `0` disables the early exaggeration entirely, useful when warm starting from an
+    /// already converged embedding.
     ///
     /// # Arguments
     ///
@@ -334,6 +339,19 @@ where
         C: FnMut(usize, &[T]) + Send + Sync + 'data,
     {
         self.epoch_callback = Some(Box::new(callback));
+
+        self
+    }
+
+    /// Seeds the embedding with the given coordinates instead of initializing it
+    /// randomly, for warm starts. The seed is consumed by the next fit, which
+    /// panics if its length is not `n_samples * embedding_dim`.
+    ///
+    /// # Arguments
+    ///
+    /// `embedding` - row-major initial coordinates.
+    pub fn initial_embedding(&mut self, embedding: impl Into<Vec<T>>) -> &mut Self {
+        self.initial_embedding = Some(embedding.into());
 
         self
     }
@@ -422,9 +440,25 @@ where
 
         // Normalize P values.
         tsne::normalize_p_values(&mut self.p_values);
+        // With no early exaggeration phase, undo the lying immediately.
+        if self.stop_lying_epoch == 0 {
+            tsne::stop_lying(&mut self.p_values);
+        }
 
-        // Initialize solution randomly.
-        tsne::random_init(&mut self.y);
+        // Seed from the supplied embedding if any, otherwise initialize randomly.
+        match self.initial_embedding.take() {
+            Some(init) => {
+                assert_eq!(
+                    init.len(),
+                    grad_entries,
+                    "error: initial embedding has {} values, expected n_samples * embedding_dim = {}",
+                    init.len(),
+                    grad_entries
+                );
+                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
+            }
+            None => tsne::random_init(&mut self.y),
+        }
 
         // Vector used to store the mean values for each embedding dimension. It's used
         // to make the solution zero mean.
@@ -506,8 +540,9 @@ where
             // Make solution zero mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
-            // Stop lying about the P-values if the time is right.
-            if epoch == self.stop_lying_epoch {
+            // Stop lying about the P-values if the time is right. Epoch 0 is
+            // handled before the loop, skip it here to avoid dividing twice.
+            if epoch == self.stop_lying_epoch && epoch != 0 {
                 tsne::stop_lying(&mut self.p_values);
             }
 
@@ -639,9 +674,25 @@ where
 
         // Normalize P values.
         tsne::normalize_p_values(&mut self.p_values);
+        // With no early exaggeration phase, undo the lying immediately.
+        if self.stop_lying_epoch == 0 {
+            tsne::stop_lying(&mut self.p_values);
+        }
 
-        // Initialize solution randomly.
-        tsne::random_init(&mut self.y);
+        // Seed from the supplied embedding if any, otherwise initialize randomly.
+        match self.initial_embedding.take() {
+            Some(init) => {
+                assert_eq!(
+                    init.len(),
+                    grad_entries,
+                    "error: initial embedding has {} values, expected n_samples * embedding_dim = {}",
+                    init.len(),
+                    grad_entries
+                );
+                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
+            }
+            None => tsne::random_init(&mut self.y),
+        }
 
         // Prepares buffers for Barnes-Hut algorithm.
         let mut positive_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
@@ -740,8 +791,9 @@ where
             // Make solution zero-mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
-            // Stop lying about the P-values if the time is right.
-            if epoch == self.stop_lying_epoch {
+            // Stop lying about the P-values if the time is right. Epoch 0 is
+            // handled before the loop, skip it here to avoid dividing twice.
+            if epoch == self.stop_lying_epoch && epoch != 0 {
                 tsne::stop_lying(&mut self.p_values);
             }
 
