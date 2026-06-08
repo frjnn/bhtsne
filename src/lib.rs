@@ -83,6 +83,13 @@ use rayon::{
 /// callback is only ever invoked sequentially from the fitting thread.
 pub type EpochCallback<'data, T> = Box<dyn FnMut(usize, &[T]) + Send + Sync + 'data>;
 
+/// Records which fitting routine last ran, so [`tSNE::kl_divergence`] can pick
+/// the matching cost evaluation.
+enum Fit<T> {
+    Exact,
+    BarnesHut { theta: T },
+}
+
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
 #[allow(non_camel_case_types)]
@@ -110,6 +117,7 @@ where
     gains: Vec<CachePadded<T>>,
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
+    fit: Option<Fit<T>>,
 }
 
 impl<'data, T, U> tSNE<'data, T, U>
@@ -194,6 +202,7 @@ where
             gains: Vec::new(),
             epoch_callback: None,
             initial_embedding: None,
+            fit: None,
         }
     }
 
@@ -359,6 +368,34 @@ where
     /// Returns the computed embedding.
     pub fn embedding(&self) -> Vec<T> {
         self.y.iter().map(|x| **x).collect()
+    }
+
+    /// Returns the Kullback-Leibler divergence of the current embedding, the cost
+    /// t-SNE minimizes, or `None` before a fit. Exact after [`exact`], a tree
+    /// approximation after [`barnes_hut`]. Recomputed on each call.
+    ///
+    /// [`exact`]: tSNE::exact
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    pub fn kl_divergence(&self) -> Option<T> {
+        let n_samples = self.data.len();
+        let embedding_dim = self.embedding_dim as usize;
+        match self.fit.as_ref()? {
+            Fit::Exact => Some(tsne::evaluate_error(
+                &self.p_values,
+                &self.y,
+                n_samples,
+                embedding_dim,
+            )),
+            Fit::BarnesHut { theta } => Some(tsne::evaluate_error_approximately(
+                &self.p_rows,
+                &self.p_columns,
+                &self.p_values,
+                &self.y,
+                n_samples,
+                embedding_dim,
+                *theta,
+            )),
+        }
     }
 
     /// Performs a parallel exact version of the t-SNE algorithm. Pairwise distances between samples
@@ -564,6 +601,7 @@ where
         self.epoch_callback = epoch_callback;
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+        self.fit = Some(Fit::Exact);
 
         self
     }
@@ -815,6 +853,7 @@ where
         self.epoch_callback = epoch_callback;
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+        self.fit = Some(Fit::BarnesHut { theta });
 
         self
     }
