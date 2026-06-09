@@ -490,7 +490,6 @@ pub(super) fn zero_mean<T>(
 /// * `n_samples` - number of samples in the embedding;
 ///
 /// * `embedding_dim` - dimensionality of the embedding space.
-#[cfg(test)]
 pub(crate) fn evaluate_error<T>(
     p_values: &[CachePadded<T>],
     y: &[CachePadded<T>],
@@ -552,7 +551,6 @@ where
 /// * `embedding_dim` - dimensionality of the embedding space.
 ///
 /// * `theta` - threshold for the Barnes-Hut algorithm.
-#[cfg(test)]
 pub(crate) fn evaluate_error_approximately<T>(
     p_rows: &[usize],
     p_columns: &[usize],

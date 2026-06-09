@@ -79,6 +79,54 @@ fn set_initial_embedding() {
 }
 
 #[test]
+fn kl_divergence_is_none_before_fitting() {
+    let data = [0.0_f32, 1.0, 2.0, 3.0];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+    let tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    assert!(tsne.kl_divergence().is_none());
+}
+
+#[test]
+fn kl_divergence_after_barnes_hut_is_finite_and_nonnegative() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(100)
+        .barnes_hut(THETA, |a, b| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        });
+
+    let kl = tsne.kl_divergence().expect("fitted");
+    assert!(kl.is_finite() && kl >= 0.0, "{kl}");
+}
+
+#[test]
+fn kl_divergence_after_exact_is_finite_and_nonnegative() {
+    const N: usize = 60;
+    const DIM: usize = 4;
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(100)
+        .exact(|a, b| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum());
+
+    let kl = tsne.kl_divergence().expect("fitted");
+    assert!(kl.is_finite() && kl >= 0.0, "{kl}");
+}
+
+#[test]
 #[ignore = "requires iris dataset"]
 fn exact_tsne() {
     let data: Vec<f32> =
@@ -103,14 +151,7 @@ fn exact_tsne() {
 
     assert_eq!(points.len(), samples.len());
 
-    assert!(
-        tsne::evaluate_error(
-            &tsne.p_values,
-            &tsne.y,
-            samples.len(),
-            tsne.embedding_dim as usize
-        ) < 0.5
-    );
+    assert!(tsne.kl_divergence().unwrap() < 0.5);
 }
 
 #[test]
@@ -140,17 +181,7 @@ fn barnes_hut_tsne() {
 
     assert_eq!(points.len(), samples.len());
 
-    assert!(
-        tsne::evaluate_error_approximately(
-            &tsne.p_rows,
-            &tsne.p_columns,
-            &tsne.p_values,
-            &tsne.y,
-            samples.len(),
-            tsne.embedding_dim as usize,
-            THETA
-        ) < 5.0
-    );
+    assert!(tsne.kl_divergence().unwrap() < 5.0);
 }
 
 /// The epoch callback must be invoked once per epoch, in order, with a snapshot
