@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    - cron: "0 0 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,6 +47,20 @@ jobs:
         run: cargo check --target wasm32-wasip1
       - name: Clippy on wasm32-unknown-unknown
         run: cargo clippy --target wasm32-unknown-unknown --features wasm_js -- -D warnings
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
 
   coverage:
     name: Coverage
