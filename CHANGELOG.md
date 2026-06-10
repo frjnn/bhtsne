@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.9
 
 Add `tSNE::barnes_hut_with_neighbors`, an index-accelerated entry point that takes caller-supplied nearest neighbors instead of building a vantage point tree, plus the public `Neighbor` struct.
 
