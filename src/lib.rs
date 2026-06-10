@@ -79,9 +79,10 @@ use rayon::{
 /// Boxed closure invoked at the end of each fitting epoch with the epoch index and a
 /// snapshot of the current embedding. See [`tSNE::epoch_callback`].
 ///
-/// The `Send + Sync` bounds only serve to keep [`tSNE`] itself `Send + Sync`, the
-/// callback is only ever invoked sequentially from the fitting thread.
-pub type EpochCallback<'data, T> = Box<dyn FnMut(usize, &[T]) + Send + Sync + 'data>;
+/// The callback is only ever invoked sequentially from the fitting thread, so it
+/// needs neither `Send` nor `Sync`. A [`tSNE`] holding a non-`Send`/non-`Sync`
+/// callback is itself non-`Send`/non-`Sync` while that callback is set.
+pub type EpochCallback<'data, T> = Box<dyn FnMut(usize, &[T]) + 'data>;
 
 /// Records which fitting routine last ran, so [`tSNE::kl_divergence`] can pick
 /// the matching cost evaluation.
@@ -325,9 +326,12 @@ where
     /// To observe progress more sparsely simply return early from the closure for
     /// the epochs to skip.
     ///
-    /// The `Send + Sync` bounds only serve to keep [`tSNE`] itself `Send + Sync`.
-    /// On single threaded targets, such as wasm, closures over non `Send` resources
-    /// can be made compatible with a wrapper like the `send_wrapper` crate.
+    /// The callback is never sent to or shared with another thread, so it needs
+    /// neither `Send` nor `Sync`. This allows single threaded targets, such as
+    /// wasm, to attach a callback over non-`Send` resources (for example one that
+    /// posts progress to a worker scope) directly, with no wrapper. Setting such a
+    /// callback makes the [`tSNE`] itself non-`Send`/non-`Sync` while it is set,
+    /// which is harmless because the fit runs on the owning thread.
     ///
     /// [`exact`]: tSNE::exact
     /// [`barnes_hut`]: tSNE::barnes_hut
@@ -353,7 +357,7 @@ where
     /// ```
     pub fn epoch_callback<C>(&mut self, callback: C) -> &mut Self
     where
-        C: FnMut(usize, &[T]) + Send + Sync + 'data,
+        C: FnMut(usize, &[T]) + 'data,
     {
         self.epoch_callback = Some(Box::new(callback));
 
