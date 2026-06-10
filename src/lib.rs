@@ -90,6 +90,14 @@ enum Fit<T> {
     BarnesHut { theta: T },
 }
 
+/// A sample's nearest neighbor for [`tSNE::barnes_hut_with_neighbors`]: its index
+/// and the distance (not a similarity) to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Neighbor<T> {
+    pub index: usize,
+    pub distance: T,
+}
+
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
 #[allow(non_camel_case_types)]
@@ -475,27 +483,8 @@ where
             }
         }
 
-        // Normalize P values.
-        tsne::normalize_p_values(&mut self.p_values);
-        // With no early exaggeration phase, undo the lying immediately.
-        if self.stop_lying_epoch == 0 {
-            tsne::stop_lying(&mut self.p_values);
-        }
-
-        // Seed from the supplied embedding if any, otherwise initialize randomly.
-        match self.initial_embedding.take() {
-            Some(init) => {
-                assert_eq!(
-                    init.len(),
-                    grad_entries,
-                    "error: initial embedding has {} values, expected n_samples * embedding_dim = {}",
-                    init.len(),
-                    grad_entries
-                );
-                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
-            }
-            None => tsne::random_init(&mut self.y),
-        }
+        // Normalize P, disable the early exaggeration if requested, and seed the embedding.
+        self.finalize_p_and_seed(grad_entries);
 
         // Vector used to store the mean values for each embedding dimension. It's used
         // to make the solution zero mean.
@@ -606,6 +595,42 @@ where
         self
     }
 
+    /// Normalizes P, undoes the early exaggeration if disabled, and seeds the
+    /// embedding. Shared by `exact` and `barnes_hut_fit`.
+    fn finalize_p_and_seed(&mut self, grad_entries: usize) {
+        // Normalize P values.
+        tsne::normalize_p_values(&mut self.p_values);
+        // With no early exaggeration phase, undo the lying immediately.
+        if self.stop_lying_epoch == 0 {
+            tsne::stop_lying(&mut self.p_values);
+        }
+
+        // Seed from the supplied embedding if any, otherwise initialize randomly.
+        match self.initial_embedding.take() {
+            Some(init) => {
+                assert_eq!(
+                    init.len(),
+                    grad_entries,
+                    "error: initial embedding has {} values, expected n_samples * embedding_dim = {}",
+                    init.len(),
+                    grad_entries
+                );
+                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
+            }
+            None => tsne::random_init(&mut self.y),
+        }
+    }
+
+    /// Validates `theta` and the perplexity before any expensive setup.
+    fn validate_fit_params(&self, theta: T) {
+        assert!(
+            theta > T::zero(),
+            "error: theta value must be greater than 0.0.
+            A value of 0.0 corresponds to using the exact version of the algorithm."
+        );
+        tsne::check_perplexity(&self.perplexity, &self.data.len());
+    }
+
     /// Performs a parallel Barnes-Hut approximation of the t-SNE algorithm.
     ///
     /// # Arguments
@@ -624,22 +649,101 @@ where
     where
         F: Fn(&U, &U) -> T + Send + Sync,
     {
-        // Checks that theta is valid.
-        assert!(
-            theta > T::zero(),
-            "error: theta value must be greater than 0.0. 
-            A value of 0.0 corresponds to using the exact version of the algorithm."
-        );
+        // Validate before building the tree so misuse does not pay for it first.
+        self.validate_fit_params(theta);
 
         let data = self.data;
-        let n_samples = self.data.len(); // Number of samples in data.
-
-        // Checks that the supplied perplexity is suitable for the number of samples at hand.
-        tsne::check_perplexity(&self.perplexity, &n_samples);
-
-        let embedding_dim = self.embedding_dim as usize;
-        // Number of  points ot consider when approximating the conditional distribution P.
+        // Number of points to consider when approximating the conditional distribution P.
         let n_neighbors: usize = (T::from(3.0).unwrap() * self.perplexity).as_();
+
+        // Build ball tree on the data set.
+        let tree = tsne::vptree::VPTree::new(data, &metric_f);
+
+        // The `move` closure owns the tree so `barnes_hut_fit` can drop it before
+        // the training loop. The `+ 1` is the sample itself, excluded by the search.
+        self.barnes_hut_fit(
+            theta,
+            n_neighbors,
+            move |index, p_columns_row, distances_row| {
+                tree.search(
+                    &data[index],
+                    index,
+                    n_neighbors + 1,
+                    p_columns_row,
+                    distances_row,
+                    &metric_f,
+                );
+            },
+        )
+    }
+
+    /// Like [`barnes_hut`], but uses caller-supplied nearest neighbors instead of a
+    /// vantage point tree, doing no metric evaluations. `neighbors[i]` are sample
+    /// `i`'s neighbors by ascending distance, excluding `i`, every row of equal
+    /// length `k` (used as `n_neighbors`, pick `k` near `3 * perplexity`). Indices
+    /// within a row must be distinct and distances finite and non-negative; these
+    /// are not checked.
+    ///
+    /// # Panics
+    ///
+    /// If `theta <= 0.0`, the rows are not one per sample, differ in length, are
+    /// empty, or hold an out-of-range index.
+    ///
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    pub fn barnes_hut_with_neighbors(
+        &mut self,
+        theta: T,
+        neighbors: &[Vec<Neighbor<T>>],
+    ) -> &mut Self {
+        let n_samples = self.data.len();
+        assert_eq!(
+            neighbors.len(),
+            n_samples,
+            "error: neighbors has {} rows, expected one per sample = {}",
+            neighbors.len(),
+            n_samples
+        );
+
+        // Rows share one dense n_samples * k block, so all must be the same length.
+        let n_neighbors = neighbors.first().map_or(0, Vec::len);
+        assert!(
+            n_neighbors > 0 && neighbors.iter().all(|row| row.len() == n_neighbors),
+            "error: every neighbors row must have the same length, greater than zero."
+        );
+
+        // These indices later index P rows in symmetrize_sparse_matrix; reject
+        // out-of-range here instead of panicking cryptically there.
+        assert!(
+            neighbors
+                .iter()
+                .flatten()
+                .all(|neighbor| neighbor.index < n_samples),
+            "error: a neighbor index is out of range, every index must be < n_samples = {n_samples}."
+        );
+
+        self.barnes_hut_fit(theta, n_neighbors, |index, p_columns_row, distances_row| {
+            p_columns_row
+                .iter_mut()
+                .zip(distances_row.iter_mut())
+                .zip(neighbors[index].iter())
+                .for_each(|((column, distance), neighbor)| {
+                    **column = neighbor.index;
+                    **distance = neighbor.distance;
+                });
+        })
+    }
+
+    /// Shared Barnes-Hut fit. `fill_neighbors(index, p_columns_row, distances_row)`
+    /// writes sample `index`'s neighbor indices and distances; the rest is common.
+    fn barnes_hut_fit<F>(&mut self, theta: T, n_neighbors: usize, fill_neighbors: F) -> &mut Self
+    where
+        F: Fn(usize, &mut [CachePadded<usize>], &mut [CachePadded<T>]) + Send + Sync,
+    {
+        // Idempotent: `barnes_hut` already validated before building its tree.
+        self.validate_fit_params(theta);
+
+        let n_samples = self.data.len(); // Number of samples in data.
+        let embedding_dim = self.embedding_dim as usize;
         // NUmber of entries in gradient and gains matrices.
         let grad_entries = n_samples * embedding_dim;
         // Number of entries in pairwise measures matrices.
@@ -664,41 +768,27 @@ where
         // to p_values[i][j]. This vector is freed inside symmetrize_sparse_matrix.
         let mut p_columns: Vec<CachePadded<usize>> = vec![0.into(); pairwise_entries];
 
-        // Computes sparse input similarities using a vantage point tree.
+        // Fill the neighbor rows, then fit the per-point Gaussian bandwidth.
         {
             // Distances buffer.
             let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); pairwise_entries];
 
-            // Build ball tree on data set. The tree is freed at the end of the scope.
-            let tree = tsne::vptree::VPTree::new(data, &metric_f);
-
-            // For each sample in the dataset compute the perplexities using a vantage point tree
-            // in parallel.
-            {
-                let perplexity = &self.perplexity; // Immutable borrow must be outside.
-                self.p_values
-                    .par_chunks_mut(n_neighbors)
-                    .zip(distances.par_chunks_mut(n_neighbors))
-                    .zip(p_columns.par_chunks_mut(n_neighbors))
-                    .zip(data.par_iter())
-                    .enumerate()
-                    .for_each(
-                        |(index, (((p_values_row, distances_row), p_columns_row), sample))| {
-                            // Writes the indices and the distances of the nearest neighbors of sample.
-                            tree.search(
-                                sample,
-                                index,
-                                n_neighbors + 1, // The first NN is sample itself.
-                                p_columns_row,
-                                distances_row,
-                                &metric_f,
-                            );
-                            debug_assert!(!p_columns_row.iter().any(|&i| *i == index));
-                            tsne::search_beta(p_values_row, distances_row, perplexity);
-                        },
-                    );
-            }
+            let perplexity = &self.perplexity; // Immutable borrow must be outside.
+            self.p_values
+                .par_chunks_mut(n_neighbors)
+                .zip(distances.par_chunks_mut(n_neighbors))
+                .zip(p_columns.par_chunks_mut(n_neighbors))
+                .enumerate()
+                .for_each(|(index, ((p_values_row, distances_row), p_columns_row))| {
+                    // Writes the indices and the distances of the nearest neighbors of the sample.
+                    fill_neighbors(index, p_columns_row, distances_row);
+                    debug_assert!(!p_columns_row.iter().any(|&i| *i == index));
+                    tsne::search_beta(p_values_row, distances_row, perplexity);
+                });
         }
+
+        // Free whatever the filler owns (the vantage point tree) before training.
+        drop(fill_neighbors);
 
         // Symmetrize sparse P matrix.
         tsne::symmetrize_sparse_matrix(
@@ -710,27 +800,8 @@ where
             &n_neighbors,
         );
 
-        // Normalize P values.
-        tsne::normalize_p_values(&mut self.p_values);
-        // With no early exaggeration phase, undo the lying immediately.
-        if self.stop_lying_epoch == 0 {
-            tsne::stop_lying(&mut self.p_values);
-        }
-
-        // Seed from the supplied embedding if any, otherwise initialize randomly.
-        match self.initial_embedding.take() {
-            Some(init) => {
-                assert_eq!(
-                    init.len(),
-                    grad_entries,
-                    "error: initial embedding has {} values, expected n_samples * embedding_dim = {}",
-                    init.len(),
-                    grad_entries
-                );
-                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
-            }
-            None => tsne::random_init(&mut self.y),
-        }
+        // Normalize P, disable the early exaggeration if requested, and seed the embedding.
+        self.finalize_p_and_seed(grad_entries);
 
         // Prepares buffers for Barnes-Hut algorithm.
         let mut positive_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];

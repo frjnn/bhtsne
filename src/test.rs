@@ -1,6 +1,6 @@
 use crossbeam::utils::CachePadded;
 
-use super::{tSNE, tsne};
+use super::{Neighbor, tSNE, tsne};
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
@@ -661,6 +661,125 @@ fn stop_lying_epoch_zero_skips_exaggeration_exact() {
         truthful < exaggerated / 3.0,
         "first epoch still exaggerated: moved {truthful} against {exaggerated} with 12x P values"
     );
+}
+
+/// Euclidean distance between two samples, the metric the Barnes-Hut tests use.
+fn euclidean(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt()
+}
+
+/// Exact k nearest neighbors per sample, sorted by ascending distance, excluding
+/// self: the same set the vantage point tree finds.
+fn brute_force_neighbors(samples: &[&[f32]], n_neighbors: usize) -> Vec<Vec<Neighbor<f32>>> {
+    (0..samples.len())
+        .map(|i| {
+            let mut distances: Vec<(usize, f32)> = (0..samples.len())
+                .filter(|&j| j != i)
+                .map(|j| (j, euclidean(samples[i], samples[j])))
+                .collect();
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            distances.truncate(n_neighbors);
+            distances
+                .into_iter()
+                .map(|(index, distance)| Neighbor { index, distance })
+                .collect()
+        })
+        .collect()
+}
+
+/// Fed the neighbors the tree would find, `barnes_hut_with_neighbors` must
+/// reproduce the `barnes_hut` embedding bit for bit (the pipeline is deterministic).
+#[test]
+fn barnes_hut_with_neighbors_matches_vptree_path() {
+    const N: usize = 80;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // A seed so both fits start from the very same embedding.
+    let seed = lcg_samples(N, NO_DIMS as usize, 99);
+
+    // Pin to one rayon thread: the parallel reductions in the fit accumulate in a
+    // thread-count dependent order, which the chaotic gradient descent would
+    // amplify, so single threaded keeps both paths bitwise reproducible.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+
+    let reference = pool.install(|| {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(100)
+            .initial_embedding(&seed[..])
+            .barnes_hut(THETA, |a, b| euclidean(a, b));
+        tsne.embedding()
+    });
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+
+    let candidate = pool.install(|| {
+        let mut tsne = tSNE::new(&samples);
+        tsne.embedding_dim(NO_DIMS)
+            .perplexity(PERPLEXITY)
+            .epochs(100)
+            .initial_embedding(&seed[..])
+            .barnes_hut_with_neighbors(THETA, &neighbors);
+        tsne.embedding()
+    });
+
+    assert_eq!(candidate, reference);
+}
+
+/// Ragged neighbor rows must be rejected.
+#[test]
+#[should_panic(expected = "same length")]
+fn barnes_hut_with_neighbors_rejects_ragged_rows() {
+    const N: usize = 80;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let mut neighbors = brute_force_neighbors(&samples, n_neighbors);
+    // Make one row shorter than the others.
+    neighbors[0].pop();
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(1)
+        .barnes_hut_with_neighbors(THETA, &neighbors);
+}
+
+/// An out-of-range neighbor index must be rejected up front.
+#[test]
+#[should_panic(expected = "out of range")]
+fn barnes_hut_with_neighbors_rejects_out_of_range_index() {
+    const N: usize = 80;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let mut neighbors = brute_force_neighbors(&samples, n_neighbors);
+    // Point one neighbor at a sample that does not exist.
+    neighbors[0][0].index = N;
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(1)
+        .barnes_hut_with_neighbors(THETA, &neighbors);
 }
 
 /// Deterministic LCG data so the tests need no RNG dependency.
