@@ -284,6 +284,56 @@ fn epoch_callback_reports_each_exact_epoch() {
     assert_eq!(last_snapshot, embedding);
 }
 
+/// The epoch callback is invoked only on the fitting thread, so it need not be
+/// `Send` or `Sync`. A closure capturing an `Rc<RefCell<_>>` is neither, which the
+/// previous bound rejected; this is exactly the shape a single threaded wasm
+/// worker needs to forward progress. If the bound ever tightened again, this test
+/// would fail to compile.
+#[test]
+fn epoch_callback_accepts_non_send_closure() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    const N: usize = 40;
+    const DIM: usize = 4;
+    const RUN_EPOCHS: usize = 10;
+
+    let mut state = 7_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
+    };
+    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    // `Rc<RefCell<_>>` is neither `Send` nor `Sync`, so this closure is `!Send`.
+    let epochs_seen = Rc::new(RefCell::new(Vec::<usize>::new()));
+    let sink = Rc::clone(&epochs_seen);
+
+    let mut tsne = tSNE::new(&samples);
+    tsne.embedding_dim(NO_DIMS)
+        .perplexity(PERPLEXITY)
+        .epochs(RUN_EPOCHS)
+        .epoch_callback(move |epoch, _snapshot| {
+            sink.borrow_mut().push(epoch);
+        })
+        .barnes_hut(THETA, |sample_a, sample_b| {
+            sample_a
+                .iter()
+                .zip(sample_b.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        });
+
+    assert_eq!(
+        *epochs_seen.borrow(),
+        (0..RUN_EPOCHS).collect::<Vec<usize>>()
+    );
+}
+
 /// A warm started fit must begin from the supplied embedding: the first epoch
 /// stays close to the seed, far closer than a random init near the origin would.
 #[test]
