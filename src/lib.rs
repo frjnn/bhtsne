@@ -66,8 +66,6 @@ use std::{error::Error, fs::File};
 
 use num_traits::{Float, cast::AsPrimitive};
 
-use crossbeam::utils::CachePadded;
-
 use rayon::{
     iter::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
@@ -116,14 +114,14 @@ where
     stop_lying_epoch: usize,
     embedding_dim: u8,
     perplexity: T,
-    p_values: Vec<CachePadded<T>>,
+    p_values: Vec<T>,
     p_rows: Vec<usize>,
     p_columns: Vec<usize>,
-    q_values: Vec<CachePadded<T>>,
-    y: Vec<CachePadded<T>>,
-    dy: Vec<CachePadded<T>>,
-    uy: Vec<CachePadded<T>>,
-    gains: Vec<CachePadded<T>>,
+    q_values: Vec<T>,
+    y: Vec<T>,
+    dy: Vec<T>,
+    uy: Vec<T>,
+    gains: Vec<T>,
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
     fit: Option<Fit<T>>,
@@ -379,7 +377,7 @@ where
 
     /// Returns the computed embedding.
     pub fn embedding(&self) -> Vec<T> {
-        self.y.iter().map(|x| **x).collect()
+        self.y.clone()
     }
 
     /// Returns the Kullback-Leibler divergence of the current embedding, the cost
@@ -442,16 +440,16 @@ where
             grad_entries,
         );
         // Prepare distributions matrices.
-        self.p_values.resize(pairwise_entries, T::zero().into()); // P.
-        self.q_values.resize(pairwise_entries, T::zero().into()); // Q.
+        self.p_values.resize(pairwise_entries, T::zero()); // P.
+        self.q_values.resize(pairwise_entries, T::zero()); // Q.
 
         // Alignment prevents false sharing.
-        let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); pairwise_entries];
+        let mut distances: Vec<T> = vec![T::zero(); pairwise_entries];
         // Zeroes the diagonal entries. The distances vector is recycled but the elements
         // corresponding to the diagonal entries of the distance matrix are always kept to 0. and
         // never written on. This hold as an invariant through all the algorithm.
         for i in 0..n_samples {
-            distances[i * n_samples + i] = T::zero().into();
+            distances[i * n_samples + i] = T::zero();
         }
 
         // Compute pairwise distances in parallel with the user supplied function.
@@ -481,9 +479,9 @@ where
         // obtain the joint P distribution.
         for i in 0..n_samples {
             for j in (i + 1)..n_samples {
-                let symmetric = *self.p_values[j * n_samples + i];
-                *self.p_values[i * n_samples + j] += symmetric;
-                *self.p_values[j * n_samples + i] = *self.p_values[i * n_samples + j];
+                let symmetric = self.p_values[j * n_samples + i];
+                self.p_values[i * n_samples + j] += symmetric;
+                self.p_values[j * n_samples + i] = self.p_values[i * n_samples + j];
             }
         }
 
@@ -508,10 +506,10 @@ where
             // Compute pairwise squared euclidean distances between embeddings in parallel.
             tsne::compute_pairwise_distance_matrix(
                 &mut distances,
-                |ith: &[CachePadded<T>], jth: &[CachePadded<T>]| {
+                |ith: &[T], jth: &[T]| {
                     ith.iter()
                         .zip(jth.iter())
-                        .map(|(&i, &j)| (*i - *j).powi(2))
+                        .map(|(&i, &j)| (i - j).powi(2))
                         .sum()
                 },
                 |index| &self.y[index * embedding_dim..index * embedding_dim + embedding_dim],
@@ -522,10 +520,10 @@ where
             self.q_values
                 .par_iter_mut()
                 .zip(distances.par_iter())
-                .for_each(|(q, d)| **q = T::one() / (T::one() + **d));
+                .for_each(|(q, d)| *q = T::one() / (T::one() + *d));
 
             // Computes the exact gradient in parallel.
-            let q_values_sum: T = self.q_values.par_iter().map(|&q| *q).sum();
+            let q_values_sum: T = self.q_values.par_iter().map(|&q| q).sum();
 
             // Immutable borrow to self must happen outside of the inner sequential
             // loop. The outer parallel loop already has a mutable borrow.
@@ -542,13 +540,13 @@ where
                             .zip(q_values_sample.iter())
                             .zip(y.chunks(embedding_dim))
                             .for_each(|((&p, &q), other_sample)| {
-                                let m: T = (*p - *q / q_values_sum) * *q;
+                                let m: T = (p - q / q_values_sum) * q;
                                 dy_sample
                                     .iter_mut()
                                     .zip(y_sample.iter())
                                     .zip(other_sample.iter())
                                     .for_each(|((dy_el, &y_el), &other_el)| {
-                                        **dy_el += (*y_el - *other_el) * m
+                                        *dy_el += (y_el - other_el) * m
                                     });
                             });
                     },
@@ -565,7 +563,7 @@ where
             );
 
             // Zeroes the gradient.
-            self.dy.iter_mut().for_each(|el| **el = T::zero());
+            self.dy.iter_mut().for_each(|el| *el = T::zero());
 
             // Make solution zero mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
@@ -586,7 +584,7 @@ where
                 snapshot
                     .iter_mut()
                     .zip(self.y.iter())
-                    .for_each(|(dst, src)| *dst = **src);
+                    .for_each(|(dst, src)| *dst = *src);
                 callback(epoch, &snapshot);
             }
         }
@@ -619,7 +617,7 @@ where
                     init.len(),
                     grad_entries
                 );
-                self.y.iter_mut().zip(&init).for_each(|(y, &v)| **y = v);
+                self.y.iter_mut().zip(&init).for_each(|(y, &v)| *y = v);
             }
             None => tsne::random_init(&mut self.y),
         }
@@ -731,8 +729,8 @@ where
                 .zip(distances_row.iter_mut())
                 .zip(neighbors[index].iter())
                 .for_each(|((column, distance), neighbor)| {
-                    **column = neighbor.index;
-                    **distance = neighbor.distance;
+                    *column = neighbor.index;
+                    *distance = neighbor.distance;
                 });
         })
     }
@@ -741,7 +739,7 @@ where
     /// writes sample `index`'s neighbor indices and distances; the rest is common.
     fn barnes_hut_fit<F>(&mut self, theta: T, n_neighbors: usize, fill_neighbors: F) -> &mut Self
     where
-        F: Fn(usize, &mut [CachePadded<usize>], &mut [CachePadded<T>]) + Send + Sync,
+        F: Fn(usize, &mut [usize], &mut [T]) + Send + Sync,
     {
         // Idempotent: `barnes_hut` already validated before building its tree.
         self.validate_fit_params(theta);
@@ -763,19 +761,19 @@ where
         );
         // The P distribution values are restricted to a subset of size n_neighbors for each input
         // sample.
-        self.p_values.resize(pairwise_entries, T::zero().into());
+        self.p_values.resize(pairwise_entries, T::zero());
 
         // This vector is used to keep track of the indexes for each nearest neighbors of each
         // sample. There's a one to one correspondence between the elements of p_columns
         // an the elements of p_values: for each row i of length n_neighbors of such matrices it
         // holds that p_columns[i][j] corresponds to the index sample which contributes
         // to p_values[i][j]. This vector is freed inside symmetrize_sparse_matrix.
-        let mut p_columns: Vec<CachePadded<usize>> = vec![0.into(); pairwise_entries];
+        let mut p_columns: Vec<usize> = vec![0usize; pairwise_entries];
 
         // Fill the neighbor rows, then fit the per-point Gaussian bandwidth.
         {
             // Distances buffer.
-            let mut distances: Vec<CachePadded<T>> = vec![T::zero().into(); pairwise_entries];
+            let mut distances: Vec<T> = vec![T::zero(); pairwise_entries];
 
             let perplexity = &self.perplexity; // Immutable borrow must be outside.
             self.p_values
@@ -786,7 +784,7 @@ where
                 .for_each(|(index, ((p_values_row, distances_row), p_columns_row))| {
                     // Writes the indices and the distances of the nearest neighbors of the sample.
                     fill_neighbors(index, p_columns_row, distances_row);
-                    debug_assert!(!p_columns_row.iter().any(|&i| *i == index));
+                    debug_assert!(!p_columns_row.contains(&index));
                     tsne::search_beta(p_values_row, distances_row, perplexity);
                 });
         }
@@ -808,10 +806,9 @@ where
         self.finalize_p_and_seed(grad_entries);
 
         // Prepares buffers for Barnes-Hut algorithm.
-        let mut positive_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
-        let mut negative_forces: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
-        let mut forces_buffer: Vec<CachePadded<T>> = vec![T::zero().into(); grad_entries];
-        let mut q_sums: Vec<CachePadded<T>> = vec![T::zero().into(); n_samples];
+        let mut positive_forces: Vec<T> = vec![T::zero(); grad_entries];
+        let mut negative_forces: Vec<T> = vec![T::zero(); grad_entries];
+        let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 
         // Vector used to store the mean values for each embedding dimension. It's used
         // to make the solution zero mean.
@@ -838,58 +835,60 @@ where
                 // Each chunk of positive_forces and negative_forces is associated to a distinct
                 // embedded sample in y. As a consequence of this the computation can be done in
                 // parallel.
-                positive_forces
-                    .par_chunks_mut(embedding_dim)
+                self.y
+                    .par_chunks(embedding_dim)
+                    .zip(positive_forces.par_chunks_mut(embedding_dim))
                     .zip(negative_forces.par_chunks_mut(embedding_dim))
-                    .zip(forces_buffer.par_chunks_mut(embedding_dim))
                     .zip(q_sums.par_iter_mut())
-                    .zip(self.y.par_chunks(embedding_dim))
                     .enumerate()
-                    .for_each(
-                        |(
-                            index,
+                    .for_each_init(
+                        || {
                             (
-                                (
-                                    ((positive_forces_row, negative_forces_row), forces_buffer_row),
-                                    q_sum,
-                                ),
-                                sample,
-                            ),
-                        )| {
+                                vec![T::zero(); embedding_dim],
+                                vec![T::zero(); embedding_dim],
+                                vec![T::zero(); embedding_dim],
+                            )
+                        },
+                        |(edge_row, nonedge_row, buffer_row),
+                         (index, (((sample, positive_out), negative_out), q_sum_out))| {
+                            // Accumulate into thread local scratch and write once, so the
+                            // per-sample updates during traversal do not false share.
+                            edge_row.iter_mut().for_each(|f| *f = T::zero());
+                            nonedge_row.iter_mut().for_each(|f| *f = T::zero());
+                            let mut q_sum = T::zero();
                             tree.compute_edge_forces(
                                 index,
                                 sample,
                                 &self.p_rows,
                                 &self.p_columns,
                                 &self.p_values,
-                                forces_buffer_row,
-                                positive_forces_row,
+                                buffer_row,
+                                edge_row,
                             );
                             tree.compute_non_edge_forces(
                                 index,
                                 theta,
-                                negative_forces_row,
-                                forces_buffer_row,
-                                q_sum,
+                                nonedge_row,
+                                buffer_row,
+                                &mut q_sum,
                             );
+                            positive_out.copy_from_slice(edge_row);
+                            negative_out.copy_from_slice(nonedge_row);
+                            *q_sum_out = q_sum;
                         },
                     );
             }
 
             // Compute final Barnes-Hut t-SNE gradient approximation.
             // Reduces partial sums of Q distribution.
-            let q_sum: T = q_sums.par_iter_mut().map(|sum| **sum).sum();
+            let q_sum: T = q_sums.par_iter().map(|sum| *sum).sum();
             self.dy
                 .par_iter_mut()
-                .zip(positive_forces.par_iter_mut())
-                .zip(negative_forces.par_iter_mut())
+                .zip(positive_forces.par_iter())
+                .zip(negative_forces.par_iter())
                 .for_each(|((grad, pf), nf)| {
-                    **grad = **pf - (**nf / q_sum);
-                    **pf = T::zero();
-                    **nf = T::zero();
+                    *grad = *pf - (*nf / q_sum);
                 });
-            // Zeroes Q-sums.
-            q_sums.iter_mut().for_each(|sum| **sum = T::zero());
 
             // Updates the embedding in parallel with gradient descent.
             tsne::update_solution(
@@ -920,7 +919,7 @@ where
                 snapshot
                     .iter_mut()
                     .zip(self.y.iter())
-                    .for_each(|(dst, src)| *dst = **src);
+                    .for_each(|(dst, src)| *dst = *src);
                 callback(epoch, &snapshot);
             }
         }
@@ -958,7 +957,7 @@ where
         let to_write = self
             .y
             .iter()
-            .map(|&el| (*el).to_string())
+            .map(|&el| el.to_string())
             .collect::<Vec<String>>();
 
         // Write headers.

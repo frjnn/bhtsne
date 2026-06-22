@@ -4,8 +4,6 @@ use rand::Rng;
 
 use num_traits::Float;
 
-use crossbeam::utils::CachePadded;
-
 /// A node of the vantage point tree.
 #[derive(Clone, Debug)]
 pub(crate) struct Node<T: Float> {
@@ -250,8 +248,8 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         target: &U,
         target_index: usize,
         k: usize,
-        neighbors_indices: &mut [CachePadded<usize>],
-        distances: &mut [CachePadded<T>],
+        neighbors_indices: &mut [usize],
+        distances: &mut [T],
         metric_f: F,
     ) where
         F: Fn(&U, &U) -> T,
@@ -275,8 +273,8 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
             }))
             .for_each(|((idx, d), result)| {
                 let HeapItem { index, distance } = result;
-                **idx = *index;
-                **d = *distance;
+                *idx = *index;
+                *d = *distance;
             });
     }
 }
