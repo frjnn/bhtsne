@@ -1,5 +1,3 @@
-use crossbeam::utils::CachePadded;
-
 use super::{Neighbor, tSNE, tsne};
 
 const D: usize = 4;
@@ -887,10 +885,10 @@ fn bounding_box_diagonal(points: &[f32], dim: usize) -> f32 {
 fn search_beta_converges_when_optimal_beta_below_one() {
     // 90 neighbours (3 * perplexity) with squared distances spread over
     // [20, 120]: the optimal beta for perplexity 30 is roughly 0.08.
-    let distances_row: Vec<CachePadded<f64>> = (0..90)
-        .map(|i| CachePadded::new((20.0 + 100.0 * (i as f64 + 1.0) / 90.0_f64).sqrt()))
+    let distances_row: Vec<f64> = (0..90)
+        .map(|i| (20.0 + 100.0 * (i as f64 + 1.0) / 90.0_f64).sqrt())
         .collect();
-    let mut p_values_row: Vec<CachePadded<f64>> = vec![CachePadded::new(0.0); 90];
+    let mut p_values_row: Vec<f64> = vec![0.0; 90];
     let perplexity = 30.0;
 
     tsne::search_beta(&mut p_values_row, &distances_row, &perplexity);
@@ -899,7 +897,7 @@ fn search_beta_converges_when_optimal_beta_below_one() {
     // must match the requested perplexity.
     let entropy: f64 = p_values_row
         .iter()
-        .map(|p| **p)
+        .copied()
         .filter(|&p| p > 0.0)
         .map(|p| -p * p.ln())
         .sum();

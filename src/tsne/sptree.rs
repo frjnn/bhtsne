@@ -5,8 +5,6 @@ use std::{
 
 use num_traits::{Float, NumCast};
 
-use crossbeam::utils::CachePadded;
-
 /// A cell for the SPTree.
 struct SPTreeCell<T: Float + Send + Sync> {
     corner: Vec<T>,
@@ -30,7 +28,7 @@ impl<T: Float + Send + Sync> SPTreeCell<T> {
     /// # Arguments
     ///
     /// `point` - a point.
-    fn contains_point(&self, point: &[CachePadded<T>]) -> bool {
+    fn contains_point(&self, point: &[T]) -> bool {
         debug_assert_eq!(point.len(), self.corner.len());
         debug_assert_eq!(point.len(), self.width.len());
 
@@ -39,7 +37,7 @@ impl<T: Float + Send + Sync> SPTreeCell<T> {
             .iter()
             .zip(self.corner.iter())
             .zip(self.width.iter())
-            .any(|((p, &c), &w)| c - w > **p || c + w < **p)
+            .any(|((p, &c), &w)| c - w > *p || c + w < *p)
     }
 }
 
@@ -52,7 +50,7 @@ where
     is_leaf: bool,
     cumulative_size: i64,
     boundary: SPTreeCell<T>,
-    data: &'a [CachePadded<T>],
+    data: &'a [T],
     center_of_mass: Vec<T>,
     index: Option<usize>,
     children: Vec<SPTree<'a, T>>,
@@ -72,7 +70,7 @@ where
     /// * `data` - data to build the tree from.
     ///
     /// * `n_samples` - number of points in `inp_data`.
-    pub(crate) fn new(dimension: usize, data: &'a [CachePadded<T>], n_samples: usize) -> Self {
+    pub(crate) fn new(dimension: usize, data: &'a [T], n_samples: usize) -> Self {
         // Mean for each dimension.
         let mut mean: Vec<T> = vec![T::zero(); dimension];
         // Min for each dimension.
@@ -87,9 +85,9 @@ where
                 .zip(min.iter_mut())
                 .zip(max.iter_mut())
                 .for_each(|(((s, mean_d), min_d), max_d)| {
-                    *mean_d += **s;
-                    *min_d = min_d.min(**s);
-                    *max_d = max_d.max(**s);
+                    *mean_d += *s;
+                    *min_d = min_d.min(*s);
+                    *max_d = max_d.max(*s);
                 })
         });
 
@@ -124,12 +122,7 @@ where
     /// * `corner` - a corner for a cell.
     ///
     /// * `width` - cell's width.
-    fn new_empty(
-        dimension: usize,
-        data: &'a [CachePadded<T>],
-        corner: Vec<T>,
-        width: Vec<T>,
-    ) -> Self {
+    fn new_empty(dimension: usize, data: &'a [T], corner: Vec<T>, width: Vec<T>) -> Self {
         let n_children = 2usize.pow(dimension as u32);
         let boundary = SPTreeCell::new(corner, width);
         let children = Vec::new();
@@ -175,7 +168,7 @@ where
                 .zip(point.iter())
                 .for_each(|(cm, &p)| {
                     *cm *= m1;
-                    *cm += m2 * *p;
+                    *cm += m2 * p;
                 });
 
             // If there is space in this quad tree and it is a leaf, add the object here.
@@ -192,7 +185,7 @@ where
                             self.data[present * self.dimension..(present + 1) * self.dimension]
                                 .iter(),
                         )
-                        .any(|(&pa, &pb)| (*pa - *pb).abs() >= T::min_positive_value())
+                        .any(|(&pa, &pb)| (pa - pb).abs() >= T::min_positive_value())
                 } else {
                     false
                 };
@@ -299,9 +292,9 @@ where
         &self,
         index: usize,
         theta: T,
-        negative_forces_row: &mut [CachePadded<T>],
-        forces_buffer: &mut [CachePadded<T>],
-        q_sum: &mut CachePadded<T>,
+        negative_forces_row: &mut [T],
+        forces_buffer: &mut [T],
+        q_sum: &mut T,
     ) {
         // Make sure that  no time is spent on empty nodes or self-interactions.
         if self.cumulative_size == 0
@@ -313,15 +306,14 @@ where
         debug_assert_eq!(negative_forces_row.len(), forces_buffer.len());
 
         // Retrieves point slice.
-        let point: &[CachePadded<T>] =
-            &self.data[index * self.dimension..(index + 1) * self.dimension];
+        let point: &[T] = &self.data[index * self.dimension..(index + 1) * self.dimension];
 
         // Compute distance between point and center-of-mass.
         forces_buffer
             .iter_mut()
             .zip(point.iter())
             .zip(self.center_of_mass.iter())
-            .for_each(|((fb, &p), cm)| **fb = *p - *cm);
+            .for_each(|((fb, &p), cm)| *fb = p - *cm);
 
         let mut distance: T = forces_buffer.iter().map(|b| b.powi(2)).sum();
 
@@ -338,13 +330,13 @@ where
 
             let mut m: T = T::from(self.cumulative_size).unwrap() * distance;
 
-            **q_sum += m;
+            *q_sum += m;
             m *= distance;
 
             negative_forces_row
                 .iter_mut()
                 .zip(forces_buffer.iter())
-                .for_each(|(nf, b)| **nf += m * **b);
+                .for_each(|(nf, b)| *nf += m * *b);
         } else {
             // Recursively apply Barnes-Hut to children.
             self.children.iter().for_each(|child| {
@@ -380,12 +372,12 @@ where
     pub(crate) fn compute_edge_forces(
         &self,
         index: usize,
-        sample: &[CachePadded<T>],
+        sample: &[T],
         p_rows: &[usize],
         p_columns: &[usize],
-        p_values: &[CachePadded<T>],
-        forces_buffer: &mut [CachePadded<T>],
-        positive_forces_row: &mut [CachePadded<T>],
+        p_values: &[T],
+        forces_buffer: &mut [T],
+        positive_forces_row: &mut [T],
     ) {
         // Indexes neighbors of sample.
         // index is the index of the sample.
@@ -401,16 +393,16 @@ where
                 .iter_mut()
                 .zip(sample.iter())
                 .zip(other_sample.iter())
-                .for_each(|((fb, s), os)| **fb = **s - **os);
+                .for_each(|((fb, s), os)| *fb = *s - *os);
 
             let mut distance = forces_buffer.iter().map(|fb| fb.powi(2)).sum::<T>();
-            distance = *p_values[i] / (distance + T::one());
+            distance = p_values[i] / (distance + T::one());
 
             // Sum positive force.
             positive_forces_row
                 .iter_mut()
                 .zip(forces_buffer.iter())
-                .for_each(|(pfr, fb)| **pfr += distance * **fb);
+                .for_each(|(pfr, fb)| *pfr += distance * *fb);
         }
     }
 }
