@@ -16,9 +16,18 @@ pub trait Scalar:
 {
 }
 
-impl Scalar for f32 {}
-
-impl Scalar for f64 {}
+impl<T> Scalar for T where
+    T: Float
+        + Send
+        + Sync
+        + AsPrimitive<usize>
+        + Sum
+        + DivAssign
+        + AddAssign
+        + MulAssign
+        + SubAssign
+{
+}
 
 /// Casts an `f64` constant into the scalar in use.
 pub fn cast<T: Float>(x: f64) -> T {
