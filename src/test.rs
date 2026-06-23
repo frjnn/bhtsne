@@ -191,15 +191,7 @@ fn epoch_callback_reports_each_barnes_hut_epoch() {
     const DIM: usize = 4;
     const RUN_EPOCHS: usize = 100;
 
-    // Deterministic LCG so the test needs no RNG dependency.
-    let mut state = 7_u64;
-    let mut next = move || {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
-    };
-    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
     let mut epochs_seen: Vec<usize> = Vec::new();
@@ -241,15 +233,7 @@ fn epoch_callback_reports_each_exact_epoch() {
     const DIM: usize = 4;
     const RUN_EPOCHS: usize = 50;
 
-    // Deterministic LCG so the test needs no RNG dependency.
-    let mut state = 7_u64;
-    let mut next = move || {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
-    };
-    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
     let mut epochs_seen: Vec<usize> = Vec::new();
@@ -296,14 +280,7 @@ fn epoch_callback_accepts_non_send_closure() {
     const DIM: usize = 4;
     const RUN_EPOCHS: usize = 10;
 
-    let mut state = 7_u64;
-    let mut next = move || {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
-    };
-    let data: Vec<f32> = (0..N * DIM).map(|_| next()).collect();
+    let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
     // `Rc<RefCell<_>>` is neither `Send` nor `Sync`, so this closure is `!Send`.

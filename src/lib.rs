@@ -492,14 +492,9 @@ where
         // to make the solution zero mean.
         let mut means: Vec<T> = vec![T::zero(); embedding_dim];
 
-        // The callback is moved out of self so that the epoch loop is free to borrow
-        // the other fields mutably. It is put back at the end of the fitting.
-        let mut epoch_callback = self.epoch_callback.take();
-        // Scratch buffer for the embedding snapshots passed to the callback.
-        let mut snapshot: Vec<T> = match epoch_callback {
-            Some(_) => vec![T::zero(); grad_entries],
-            None => Vec::new(),
-        };
+        // The callback is detached from self for the fit so the epoch loop is free
+        // to borrow the other fields mutably; it is put back once the loop ends.
+        let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
         // Main fitting loop.
         for epoch in 0..self.epochs {
@@ -568,25 +563,7 @@ where
             // Make solution zero mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
-            // Stop lying about the P-values if the time is right. Epoch 0 is
-            // handled before the loop, skip it here to avoid dividing twice.
-            if epoch == self.stop_lying_epoch && epoch != 0 {
-                tsne::stop_lying(&mut self.p_values);
-            }
-
-            // Switches momentum if the time is right.
-            if epoch == self.momentum_switch_epoch {
-                self.momentum = self.final_momentum;
-            }
-
-            // Reports the embedding at the end of the epoch.
-            if let Some(callback) = epoch_callback.as_mut() {
-                snapshot
-                    .iter_mut()
-                    .zip(self.y.iter())
-                    .for_each(|(dst, src)| *dst = *src);
-                callback(epoch, &snapshot);
-            }
+            self.epoch_tail(epoch, &mut epoch_callback, &mut snapshot);
         }
         // Puts the callback back in place.
         self.epoch_callback = epoch_callback;
@@ -621,16 +598,6 @@ where
             }
             None => tsne::random_init(&mut self.y),
         }
-    }
-
-    /// Validates `theta` and the perplexity before any expensive setup.
-    fn validate_fit_params(&self, theta: T) {
-        assert!(
-            theta > T::zero(),
-            "error: theta value must be greater than 0.0.
-            A value of 0.0 corresponds to using the exact version of the algorithm."
-        );
-        tsne::check_perplexity(&self.perplexity, &self.data.len());
     }
 
     /// Performs a parallel Barnes-Hut approximation of the t-SNE algorithm.
@@ -814,14 +781,9 @@ where
         // to make the solution zero mean.
         let mut means: Vec<T> = vec![T::zero(); embedding_dim];
 
-        // The callback is moved out of self so that the epoch loop is free to borrow
-        // the other fields mutably. It is put back at the end of the fitting.
-        let mut epoch_callback = self.epoch_callback.take();
-        // Scratch buffer for the embedding snapshots passed to the callback.
-        let mut snapshot: Vec<T> = match epoch_callback {
-            Some(_) => vec![T::zero(); grad_entries],
-            None => Vec::new(),
-        };
+        // The callback is detached from self for the fit so the epoch loop is free
+        // to borrow the other fields mutably; it is put back once the loop ends.
+        let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
         // Main Training loop.
         for epoch in 0..self.epochs {
@@ -903,25 +865,7 @@ where
             // Make solution zero-mean.
             tsne::zero_mean(&mut means, &mut self.y, n_samples, embedding_dim);
 
-            // Stop lying about the P-values if the time is right. Epoch 0 is
-            // handled before the loop, skip it here to avoid dividing twice.
-            if epoch == self.stop_lying_epoch && epoch != 0 {
-                tsne::stop_lying(&mut self.p_values);
-            }
-
-            // Switches momentum if the time is right.
-            if epoch == self.momentum_switch_epoch {
-                self.momentum = self.final_momentum;
-            }
-
-            // Reports the embedding at the end of the epoch.
-            if let Some(callback) = epoch_callback.as_mut() {
-                snapshot
-                    .iter_mut()
-                    .zip(self.y.iter())
-                    .for_each(|(dst, src)| *dst = *src);
-                callback(epoch, &snapshot);
-            }
+            self.epoch_tail(epoch, &mut epoch_callback, &mut snapshot);
         }
         // Puts the callback back in place.
         self.epoch_callback = epoch_callback;
@@ -930,6 +874,67 @@ where
         self.fit = Some(Fit::BarnesHut { theta });
 
         self
+    }
+
+    /// Detaches the epoch callback from `self` for the duration of a fit, so the
+    /// epoch loop is free to borrow the other fields mutably. Returns it together
+    /// with the scratch buffer its snapshots are copied into, empty when there is
+    /// no callback. The caller restores the callback once the loop ends.
+    ///
+    /// # Arguments
+    ///
+    /// `grad_entries` - length of the embedding, i.e. the size of the snapshot buffer.
+    fn take_callback_and_snapshot(
+        &mut self,
+        grad_entries: usize,
+    ) -> (Option<EpochCallback<'data, T>>, Vec<T>) {
+        let epoch_callback = self.epoch_callback.take();
+        let snapshot = match epoch_callback {
+            Some(_) => vec![T::zero(); grad_entries],
+            None => Vec::new(),
+        };
+
+        (epoch_callback, snapshot)
+    }
+
+    /// Shared tail of each training epoch: stops the early exaggeration at the
+    /// right epoch, switches momentum, and fires the epoch callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `epoch` - zero-based index of the epoch that just completed.
+    ///
+    /// * `epoch_callback` - callback detached from `self` for the fit, invoked
+    ///   here with a snapshot of the current embedding.
+    ///
+    /// * `snapshot` - scratch buffer the embedding is copied into before being
+    ///   handed to the callback. Unused when there is no callback.
+    fn epoch_tail(
+        &mut self,
+        epoch: usize,
+        epoch_callback: &mut Option<EpochCallback<'data, T>>,
+        snapshot: &mut [T],
+    ) {
+        if epoch == self.stop_lying_epoch && epoch != 0 {
+            tsne::stop_lying(&mut self.p_values);
+        }
+        if epoch == self.momentum_switch_epoch {
+            self.momentum = self.final_momentum;
+        }
+        if let Some(callback) = epoch_callback.as_mut() {
+            snapshot.copy_from_slice(&self.y);
+            callback(epoch, snapshot);
+        }
+    }
+
+    /// Validates `theta` and the perplexity before any expensive setup.
+    fn validate_fit_params(&self, theta: T) {
+        assert!(
+            theta > T::zero(),
+            "error: theta value must be greater than 0.0.
+            A value of 0.0 corresponds to using the exact version of the algorithm."
+        );
+        tsne::check_perplexity(&self.perplexity, &self.data.len());
     }
 
     /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
