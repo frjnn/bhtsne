@@ -16,7 +16,6 @@ use bhtsne::tSNE;
 use common::{Scalar, brute_force_neighbors, cast, lcg, sq_euclidean};
 
 const INPUT_DIM: usize = 50;
-const EMBED_DIM: u8 = 2;
 const PERPLEXITY: f64 = 30.0;
 const THETA: f64 = 0.5;
 const EPOCHS: usize = 100;
@@ -30,9 +29,8 @@ fn bench_exact<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: &str)
             let id = BenchmarkId::new(format!("{dtype}/n{n}"), epochs);
             group.bench_with_input(id, &epochs, |b, &e| {
                 b.iter(|| {
-                    let mut tsne = tSNE::new(&samples);
-                    tsne.embedding_dim(EMBED_DIM)
-                        .perplexity(cast(PERPLEXITY))
+                    let mut tsne: tSNE<T, &[T]> = tSNE::new(&samples);
+                    tsne.perplexity(cast(PERPLEXITY))
                         .epochs(e)
                         .exact(|a, b| sq_euclidean(a, b));
                     black_box(tsne.embedding());
@@ -53,9 +51,8 @@ fn bench_barnes_hut<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: 
             let id = BenchmarkId::new(format!("{dtype}/n{n}"), epochs);
             group.bench_with_input(id, &epochs, |b, &e| {
                 b.iter(|| {
-                    let mut tsne = tSNE::new(&samples);
-                    tsne.embedding_dim(EMBED_DIM)
-                        .perplexity(cast(PERPLEXITY))
+                    let mut tsne: tSNE<T, &[T]> = tSNE::new(&samples);
+                    tsne.perplexity(cast(PERPLEXITY))
                         .epochs(e)
                         .barnes_hut_with_neighbors(cast(THETA), black_box(&neighbors));
                     black_box(tsne.embedding());

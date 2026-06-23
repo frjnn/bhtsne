@@ -49,13 +49,6 @@ fn set_stop_lying_epoch() {
 }
 
 #[test]
-fn set_embedding_dim() {
-    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
-    tsne.embedding_dim(3);
-    assert_eq!(tsne.embedding_dim, 3);
-}
-
-#[test]
 fn set_perplexity() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.perplexity(15.);
@@ -91,9 +84,8 @@ fn kl_divergence_after_barnes_hut_is_finite_and_nonnegative() {
     let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(100)
         .barnes_hut(THETA, |a, b| {
             a.iter()
@@ -107,6 +99,27 @@ fn kl_divergence_after_barnes_hut_is_finite_and_nonnegative() {
     assert!(kl.is_finite() && kl >= 0.0, "{kl}");
 }
 
+/// Smoke test for the parallel tree build and the force and reduction passes. N is above the
+/// parallel build threshold, so the children are genuinely built on the thread pool.
+#[test]
+fn parallel_barnes_hut_build_smoke() {
+    const N: usize = 160;
+    const DIM: usize = 4;
+    let data = lcg_samples(N, DIM, 5);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(3)
+        .barnes_hut_with_neighbors(THETA, &neighbors);
+
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * NO_DIMS as usize);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}
+
 #[test]
 fn kl_divergence_after_exact_is_finite_and_nonnegative() {
     const N: usize = 60;
@@ -114,9 +127,8 @@ fn kl_divergence_after_exact_is_finite_and_nonnegative() {
     let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(100)
         .exact(|a, b| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum());
 
@@ -131,9 +143,8 @@ fn exact_tsne() {
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
     let samples: Vec<&[f32]> = data.chunks(D).collect::<Vec<&[f32]>>();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(EPOCHS)
         .exact(|sample_a, sample_b| {
             sample_a
@@ -159,9 +170,8 @@ fn barnes_hut_tsne() {
         crate::load_csv("iris.csv", true, Some(&[4]), |float| float.parse().unwrap()).unwrap();
     let samples: Vec<&[f32]> = data.chunks(D).collect::<Vec<&[f32]>>();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(EPOCHS)
         .barnes_hut(THETA, |sample_a, sample_b| {
             sample_a
@@ -198,9 +208,8 @@ fn epoch_callback_reports_each_barnes_hut_epoch() {
     let mut last_snapshot: Vec<f32> = Vec::new();
 
     let embedding = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(RUN_EPOCHS)
             .epoch_callback(|epoch, snapshot| {
                 assert_eq!(snapshot.len(), N * NO_DIMS as usize);
@@ -240,9 +249,8 @@ fn epoch_callback_reports_each_exact_epoch() {
     let mut last_snapshot: Vec<f32> = Vec::new();
 
     let embedding = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(RUN_EPOCHS)
             .epoch_callback(|epoch, snapshot| {
                 assert_eq!(snapshot.len(), N * NO_DIMS as usize);
@@ -287,9 +295,8 @@ fn epoch_callback_accepts_non_send_closure() {
     let epochs_seen = Rc::new(RefCell::new(Vec::<usize>::new()));
     let sink = Rc::clone(&epochs_seen);
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(RUN_EPOCHS)
         .epoch_callback(move |epoch, _snapshot| {
             sink.borrow_mut().push(epoch);
@@ -321,9 +328,8 @@ fn warm_start_begins_from_initial_embedding_barnes_hut() {
 
     // A plausible layout to continue from.
     let seed = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(300)
             .barnes_hut(THETA, |sample_a, sample_b| {
                 sample_a
@@ -338,9 +344,8 @@ fn warm_start_begins_from_initial_embedding_barnes_hut() {
 
     let mut first_snapshot: Vec<f32> = Vec::new();
     {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(5)
             .stop_lying_epoch(0)
             .momentum_switch_epoch(0)
@@ -390,9 +395,8 @@ fn warm_start_begins_from_initial_embedding_exact() {
 
     // A plausible layout to continue from.
     let seed = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(300)
             .exact(|sample_a, sample_b| {
                 sample_a
@@ -406,9 +410,8 @@ fn warm_start_begins_from_initial_embedding_exact() {
 
     let mut first_snapshot: Vec<f32> = Vec::new();
     {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(5)
             .stop_lying_epoch(0)
             .momentum_switch_epoch(0)
@@ -446,7 +449,7 @@ fn warm_start_begins_from_initial_embedding_exact() {
 }
 
 /// The Barnes-Hut fit must reject a seed whose length does not match
-/// `n_samples * embedding_dim`.
+/// `n_samples * D`.
 #[test]
 #[should_panic(expected = "initial embedding has")]
 fn warm_start_rejects_wrong_length_barnes_hut() {
@@ -456,9 +459,8 @@ fn warm_start_rejects_wrong_length_barnes_hut() {
     let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(1)
         .initial_embedding([0.0; 7])
         .barnes_hut(THETA, |sample_a, sample_b| {
@@ -482,9 +484,8 @@ fn warm_start_rejects_wrong_length_exact() {
     let data = lcg_samples(N, DIM, 7);
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(1)
         .initial_embedding([0.0; 7])
         .exact(|sample_a, sample_b| {
@@ -507,9 +508,8 @@ fn warm_start_seed_is_consumed_by_the_fit() {
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
     let seed = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(300)
             .barnes_hut(THETA, |sample_a, sample_b| {
                 sample_a
@@ -523,9 +523,8 @@ fn warm_start_seed_is_consumed_by_the_fit() {
     };
 
     let mut second_run_first_snapshot: Vec<f32> = Vec::new();
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(1)
         .initial_embedding(&seed[..]);
 
@@ -584,9 +583,8 @@ fn stop_lying_epoch_zero_skips_exaggeration_barnes_hut() {
 
     // A plausible layout to continue from.
     let seed = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(300)
             .barnes_hut(THETA, |sample_a, sample_b| {
                 sample_a
@@ -602,9 +600,8 @@ fn stop_lying_epoch_zero_skips_exaggeration_barnes_hut() {
     let first_step = |stop_lying_epoch: usize| -> f32 {
         let mut first_snapshot: Vec<f32> = Vec::new();
         {
-            let mut tsne = tSNE::new(&samples);
-            tsne.embedding_dim(NO_DIMS)
-                .perplexity(PERPLEXITY)
+            let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+            tsne.perplexity(PERPLEXITY)
                 .epochs(1)
                 .stop_lying_epoch(stop_lying_epoch)
                 .initial_embedding(&seed[..])
@@ -643,9 +640,8 @@ fn stop_lying_epoch_zero_skips_exaggeration_exact() {
 
     // A plausible layout to continue from.
     let seed = {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(300)
             .exact(|sample_a, sample_b| {
                 sample_a
@@ -660,9 +656,8 @@ fn stop_lying_epoch_zero_skips_exaggeration_exact() {
     let first_step = |stop_lying_epoch: usize| -> f32 {
         let mut first_snapshot: Vec<f32> = Vec::new();
         {
-            let mut tsne = tSNE::new(&samples);
-            tsne.embedding_dim(NO_DIMS)
-                .perplexity(PERPLEXITY)
+            let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+            tsne.perplexity(PERPLEXITY)
                 .epochs(1)
                 .stop_lying_epoch(stop_lying_epoch)
                 .initial_embedding(&seed[..])
@@ -729,36 +724,28 @@ fn barnes_hut_with_neighbors_matches_vptree_path() {
     // A seed so both fits start from the very same embedding.
     let seed = lcg_samples(N, NO_DIMS as usize, 99);
 
-    // Pin to one rayon thread: the parallel reductions in the fit accumulate in a
-    // thread-count dependent order, which the chaotic gradient descent would
-    // amplify, so single threaded keeps both paths bitwise reproducible.
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()
-        .unwrap();
-
-    let reference = pool.install(|| {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+    // Both fits run on the default pool: the pipeline is deterministic at any thread count, so the
+    // tree's neighbors fed to `barnes_hut_with_neighbors` reproduce the `barnes_hut` embedding.
+    let reference = {
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(100)
             .initial_embedding(&seed[..])
             .barnes_hut(THETA, |a, b| euclidean(a, b));
         tsne.embedding()
-    });
+    };
 
     let n_neighbors = (3.0 * PERPLEXITY) as usize;
     let neighbors = brute_force_neighbors(&samples, n_neighbors);
 
-    let candidate = pool.install(|| {
-        let mut tsne = tSNE::new(&samples);
-        tsne.embedding_dim(NO_DIMS)
-            .perplexity(PERPLEXITY)
+    let candidate = {
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
             .epochs(100)
             .initial_embedding(&seed[..])
             .barnes_hut_with_neighbors(THETA, &neighbors);
         tsne.embedding()
-    });
+    };
 
     assert_eq!(candidate, reference);
 }
@@ -778,9 +765,8 @@ fn barnes_hut_with_neighbors_rejects_ragged_rows() {
     // Make one row shorter than the others.
     neighbors[0].pop();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(1)
         .barnes_hut_with_neighbors(THETA, &neighbors);
 }
@@ -800,9 +786,8 @@ fn barnes_hut_with_neighbors_rejects_out_of_range_index() {
     // Point one neighbor at a sample that does not exist.
     neighbors[0][0].index = N;
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(NO_DIMS)
-        .perplexity(PERPLEXITY)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
         .epochs(1)
         .barnes_hut_with_neighbors(THETA, &neighbors);
 }
@@ -915,9 +900,8 @@ fn barnes_hut_separates_clusters_at_large_input_scale() {
     }
     let samples: Vec<&[f32]> = data.chunks(DIM).collect();
 
-    let mut tsne = tSNE::new(&samples);
-    tsne.embedding_dim(2)
-        .perplexity(30.0)
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(30.0)
         .epochs(500)
         .barnes_hut(THETA, |sample_a, sample_b| {
             sample_a
@@ -955,5 +939,104 @@ fn barnes_hut_separates_clusters_at_large_input_scale() {
     assert!(
         same_cluster as f64 / n as f64 > 0.95,
         "clusters not separated: only {same_cluster}/{n} points have a same-cluster nearest neighbour"
+    );
+}
+
+/// With neighbours supplied (so the vantage point tree's randomness is out of the picture), the
+/// Barnes-Hut loop is reproducible bit for bit across runs on the default multi-threaded pool. N is
+/// above the parallel build threshold, so the tree is built in parallel.
+#[test]
+fn barnes_hut_is_reproducible_run_to_run() {
+    const N: usize = 600;
+    const DIM: usize = 4;
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+    let seed = lcg_samples(N, NO_DIMS as usize, 99);
+
+    let run = || {
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
+            .epochs(150)
+            .initial_embedding(&seed[..])
+            .barnes_hut_with_neighbors(THETA, &neighbors);
+        tsne.embedding().to_vec()
+    };
+
+    let first = run();
+    let second = run();
+    assert_eq!(
+        first, second,
+        "Barnes-Hut embedding is not reproducible run to run"
+    );
+}
+
+/// Regression test for the parallel build, white box. The counting and scatter passes reuse each
+/// child's `cumulative_size` as a prefix cursor, so an empty child can be left holding a stale
+/// nonzero value. If the aggregation then treats it as real mass at the origin, the cell centres of
+/// mass are pulled off, corrupting the Barnes-Hut forces. This checks the structural invariants a
+/// correct build maintains: stored points stay inside their cells and each cell's centre of mass
+/// lies within the cell. `SPTree::new` additionally debug-asserts point conservation (leaf mass
+/// plus boundary-crack drops equals the input count). The tree is built over a 2D point cloud (the
+/// embedding space the real tree partitions), offset far from the origin so any centre of mass
+/// dragged toward it lands outside its cell. N is above the parallel build threshold.
+#[test]
+fn sptree_build_maintains_invariants() {
+    const N: usize = 2_000;
+    let mut data = lcg_samples(N, 2, 17);
+    for value in data.iter_mut() {
+        *value += 100.0;
+    }
+
+    let tree = tsne::sptree::SPTree::<f32, 2>::new(&data, N);
+
+    assert!(tree.is_correct(), "stored points escaped their cells");
+    assert!(
+        tree.centers_of_mass_within_cells(),
+        "a cell centre of mass escaped its cell, the build aggregated phantom mass"
+    );
+}
+
+/// End-to-end regression test for the same bug, reproducing the symptom directly: corrupted
+/// repulsive forces let attraction collapse the whole embedding onto a handful of coordinates. A
+/// healthy run spreads the points out, so most embedded positions are distinct. N is above the
+/// parallel build threshold.
+#[test]
+fn barnes_hut_does_not_collapse_embedding() {
+    use std::collections::HashSet;
+
+    const N: usize = 500;
+    const DIM: usize = 8;
+    let data = lcg_samples(N, DIM, 23);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(30.0)
+        .epochs(1000)
+        .barnes_hut(THETA, |a, b| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        });
+    let embedding = tsne.embedding();
+
+    // Count distinct positions, rounded to a hundredth. The collapse piled every point onto three
+    // coordinates, a healthy embedding keeps them apart.
+    let distinct: HashSet<(i64, i64)> = embedding
+        .chunks_exact(2)
+        .map(|point| {
+            (
+                (point[0] * 100.0).round() as i64,
+                (point[1] * 100.0).round() as i64,
+            )
+        })
+        .collect();
+    assert!(
+        distinct.len() > N / 2,
+        "embedding collapsed: only {} distinct positions for {N} points",
+        distinct.len()
     );
 }

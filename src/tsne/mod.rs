@@ -11,12 +11,16 @@ use rayon::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
         ParallelIterator,
     },
-    slice::ParallelSliceMut,
+    slice::{ParallelSlice, ParallelSliceMut},
 };
 
 use rand_distr::{Distribution, Normal};
 
 use num_traits::{AsPrimitive, Float};
+
+/// Samples per block for the deterministic parallel reductions: blocks are summed sequentially in
+/// parallel and combined in index order, so the result is independent of the work-stealing schedule.
+const REDUCTION_BLOCK: usize = 1024;
 
 /// Checks whether the perplexity is too large for the number of samples.
 ///
@@ -255,6 +259,18 @@ where
         .for_each(|p| *p /= p_values_row_sum + T::epsilon());
 }
 
+/// Deterministic parallel sum of `values`: fixed-size blocks are summed sequentially in parallel,
+/// then combined in index order, so the result does not depend on the work-stealing schedule.
+pub(super) fn deterministic_sum<T: Float + Send + Sync + Sum>(values: &[T]) -> T {
+    const BLOCK: usize = 4096;
+    values
+        .par_chunks(BLOCK)
+        .map(|block| block.iter().copied().sum::<T>())
+        .collect::<Vec<T>>()
+        .into_iter()
+        .fold(T::zero(), |total, partial| total + partial)
+}
+
 /// Normalizes the P values.
 ///
 /// # Arguments
@@ -263,7 +279,7 @@ where
 pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign + Sum>(
     p_values: &mut [T],
 ) {
-    let p_values_sum: T = p_values.par_iter().map(|p| *p).sum();
+    let p_values_sum: T = deterministic_sum(p_values);
     let twelve = T::from(12.0).unwrap();
     p_values.par_iter_mut().for_each(|p| {
         *p /= p_values_sum + T::epsilon();
@@ -424,45 +440,43 @@ pub(super) fn stop_lying<T: Float + Send + Sync + DivAssign>(p_values: &mut [T])
     p_values.par_iter_mut().for_each(|p| *p /= twelve);
 }
 
-/// Makes the solution zero mean. The embedded samples are taken in chunks of size
-/// corresponding to the embedding space dimensionality, so that each chunks
-/// corresponds to a sample. Each of the so obtained samples is summed element wise
-/// to the means buffer. At last, each mean of the means buffer is divided by the number
-/// of samples.
-///
-/// # Arguments
-///
-/// * ` means` - where the means of each component of the embedding are stored.
-///
-/// * `y` - embedding.
-///
-/// * `n_samples` -  number of samples in the embedding.
-///
-/// * `embedding_dim`- dimensionality of the embedding space.
-pub(super) fn zero_mean<T>(means: &mut [T], y: &mut [T], n_samples: usize, embedding_dim: usize)
+/// Recenters `y` to zero mean. The per-dimension sums are reduced deterministically (fixed-size
+/// blocks summed in parallel, then combined in index order) and subtracted in parallel.
+pub(super) fn zero_mean<T, const D: usize>(y: &mut [T], n_samples: usize)
 where
     T: Float + Send + Sync + Copy + AddAssign + DivAssign + SubAssign,
 {
-    // Not parallel as it accumulates into means.
-    y.chunks(embedding_dim).for_each(|embedded_sample| {
+    let block_len = REDUCTION_BLOCK * D;
+    let partials: Vec<[T; D]> = y
+        .par_chunks(block_len)
+        .map(|block| {
+            let mut totals = [T::zero(); D];
+            block.chunks(D).for_each(|sample| {
+                totals
+                    .iter_mut()
+                    .zip(sample.iter())
+                    .for_each(|(total, el)| *total += *el);
+            });
+            totals
+        })
+        .collect();
+
+    let mut means = [T::zero(); D];
+    for partial in &partials {
         means
             .iter_mut()
-            .zip(embedded_sample.iter())
-            .for_each(|(mean, el)| *mean += *el);
-    });
-
+            .zip(partial.iter())
+            .for_each(|(mean, total)| *mean += *total);
+    }
     let n_samples = T::from(n_samples).unwrap();
-    means.iter_mut().for_each(|el| *el /= n_samples);
+    means.iter_mut().for_each(|mean| *mean /= n_samples);
 
-    y.par_chunks_mut(embedding_dim).for_each(|embedded_sample| {
-        embedded_sample
+    y.par_chunks_mut(D).for_each(|sample| {
+        sample
             .iter_mut()
             .zip(means.iter())
             .for_each(|(el, mean)| *el -= *mean);
     });
-
-    // Zeroes the mean buffer.
-    means.iter_mut().for_each(|el| *el = T::zero());
 }
 
 /// Evaluate t-SNE cost function exactly.
@@ -474,27 +488,20 @@ where
 /// * `y` - current embedding.
 ///
 /// * `n_samples` - number of samples in the embedding;
-///
-/// * `embedding_dim` - dimensionality of the embedding space.
-pub(crate) fn evaluate_error<T>(
-    p_values: &[T],
-    y: &[T],
-    n_samples: usize,
-    embedding_dim: usize,
-) -> T
+pub(crate) fn evaluate_error<T, const D: usize>(p_values: &[T], y: &[T], n_samples: usize) -> T
 where
     T: Float + Send + Sync + AddAssign + Add + DivAssign + Sum,
 {
     let mut distances: Vec<T> = vec![T::zero(); n_samples * n_samples];
     compute_pairwise_distance_matrix(
         &mut distances,
-        |a: &[T], b: &[T]| {
+        |a: &[T; D], b: &[T; D]| {
             a.iter()
                 .zip(b.iter())
                 .map(|(aa, bb)| (*aa - *bb).powi(2))
                 .sum::<T>()
         },
-        |i| &y[i * embedding_dim..(i + 1) * embedding_dim],
+        |i| (&y[i * D..(i + 1) * D]).try_into().unwrap(),
         n_samples,
     );
 
@@ -534,16 +541,13 @@ where
 ///
 /// * `n_samples` - number of samples.
 ///
-/// * `embedding_dim` - dimensionality of the embedding space.
-///
 /// * `theta` - threshold for the Barnes-Hut algorithm.
-pub(crate) fn evaluate_error_approximately<T>(
+pub(crate) fn evaluate_error_approximately<T, const D: usize>(
     p_rows: &[usize],
     p_columns: &[usize],
     p_values: &[T],
     y: &[T],
     n_samples: usize,
-    embedding_dim: usize,
     theta: T,
 ) -> T
 where
@@ -551,20 +555,15 @@ where
 {
     // Get estimate of normalization term.
     let q_sum = {
-        let tree = sptree::SPTree::new(embedding_dim, y, n_samples);
+        let tree = sptree::SPTree::<T, D>::new(y, n_samples);
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 
-        let mut buffer: Vec<T> = vec![T::zero(); n_samples * embedding_dim];
-        let mut negative_forces: Vec<T> = vec![T::zero(); n_samples * embedding_dim];
-
-        q_sums
-            .par_iter_mut()
-            .zip(negative_forces.par_chunks_mut(embedding_dim))
-            .zip(buffer.par_chunks_mut(embedding_dim))
-            .enumerate()
-            .for_each(|(index, ((sum, negative_forces_row), buffer_row))| {
-                tree.compute_non_edge_forces(index, theta, negative_forces_row, buffer_row, sum);
-            });
+        q_sums.par_iter_mut().enumerate().for_each(|(index, sum)| {
+            // Local scratch: the repulsive forces are not needed here, only their q_sum.
+            let mut buffer = [T::zero(); D];
+            let mut negative_forces = [T::zero(); D];
+            tree.compute_non_edge_forces(index, theta, &mut negative_forces, &mut buffer, sum);
+        });
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
     };
@@ -575,9 +574,9 @@ where
         .par_iter_mut()
         .enumerate()
         .for_each(|(index, cost)| {
-            let sample_a = &y[index * embedding_dim..(index + 1) * embedding_dim];
+            let sample_a = &y[index * D..(index + 1) * D];
             for n in p_rows[index]..p_rows[index + 1] {
-                let sample_b = &y[p_columns[n] * embedding_dim..(p_columns[n] + 1) * embedding_dim];
+                let sample_b = &y[p_columns[n] * D..(p_columns[n] + 1) * D];
 
                 let mut q = sample_a
                     .iter()
