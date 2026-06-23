@@ -65,8 +65,6 @@ pub(super) fn prepare_buffers<T: Float + Send + Sync>(
 ///
 /// # Arguments
 ///
-/// * `y` - embedding.
-///
 /// * `dy` - gradient.
 ///
 /// * `uy` - momentum buffer.
