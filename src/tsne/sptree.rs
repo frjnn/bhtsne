@@ -5,8 +5,6 @@ use std::{
 
 use num_traits::{Float, NumCast};
 
-use rayon::prelude::*;
-
 /// Subtrees of at least this many points build their children in parallel. Smaller ones stay
 /// sequential, where the work-stealing overhead would dominate.
 const PARALLEL_BUILD_THRESHOLD: usize = 128;
@@ -130,8 +128,8 @@ where
 
     /// Recursively builds the subtree from the point `indices`, using `scratch` (same length) to
     /// group them by child cell. The two buffers swap roles each level so the index storage is
-    /// never reallocated. Large subtrees build their children in parallel. The structure does not
-    /// depend on insertion order.
+    /// never reallocated. Children are forked with `rayon::join` above a coarsening cutoff and built
+    /// sequentially below it. The structure does not depend on insertion order.
     fn build(&mut self, indices: &mut [usize], scratch: &mut [usize]) -> usize {
         let len = indices.len();
         self.cumulative_size = len as i64;
@@ -192,53 +190,15 @@ where
             }
         }
 
-        // Give each non-empty child its window `[previous end, cumulative_size)`: grouped indices
-        // in `scratch`, fresh scratch in `indices` (the two swap roles one level down).
-        let dropped_below: usize = if placed >= PARALLEL_BUILD_THRESHOLD {
-            let mut child_indices: &mut [usize] = &mut scratch[..placed];
-            let mut child_scratch: &mut [usize] = &mut indices[..placed];
-            let mut previous_end = 0usize;
-            let mut work: Vec<(&mut SPTree<'a, T, D>, &mut [usize], &mut [usize])> =
-                Vec::with_capacity(self.children.len());
-            for child in self.children.iter_mut() {
-                let count = child.cumulative_size as usize - previous_end;
-                previous_end += count;
-                let (mine, rest_indices) = child_indices.split_at_mut(count);
-                let (my_scratch, rest_scratch) = child_scratch.split_at_mut(count);
-                child_indices = rest_indices;
-                child_scratch = rest_scratch;
-                if count != 0 {
-                    work.push((child, mine, my_scratch));
-                } else {
-                    // Empty child: clear the prefix-sum cursor left in `cumulative_size`,
-                    // otherwise it registers as phantom mass in `combine_center_of_mass`.
-                    child.cumulative_size = 0;
-                }
-            }
-            work.into_par_iter()
-                .map(|(child, mine, my_scratch)| child.build(mine, my_scratch))
-                .sum()
-        } else {
-            // Sequential build, avoiding the work list allocation.
-            let mut child_indices: &mut [usize] = &mut scratch[..placed];
-            let mut child_scratch: &mut [usize] = &mut indices[..placed];
-            let mut previous_end = 0usize;
-            let mut dropped_below = 0usize;
-            for child in self.children.iter_mut() {
-                let count = child.cumulative_size as usize - previous_end;
-                previous_end += count;
-                let (mine, rest_indices) = child_indices.split_at_mut(count);
-                let (my_scratch, rest_scratch) = child_scratch.split_at_mut(count);
-                child_indices = rest_indices;
-                child_scratch = rest_scratch;
-                if count != 0 {
-                    dropped_below += child.build(mine, my_scratch);
-                } else {
-                    child.cumulative_size = 0;
-                }
-            }
-            dropped_below
-        };
+        // Build the children: grouped indices in `scratch`, fresh scratch in `indices` (the two
+        // swap roles one level down). `build_children` coarsens — small groups go sequential, larger
+        // ones split the child slice under a single `rayon::join` (allocation free).
+        let dropped_below = Self::build_children(
+            &mut self.children,
+            &mut scratch[..placed],
+            &mut indices[..placed],
+            0,
+        );
 
         // The node's mass is the points actually in the leaves below it: the sum of its children's
         // final `cumulative_size`. This matches the centre of mass `combine_center_of_mass` averages
@@ -251,6 +211,54 @@ where
         self.combine_center_of_mass();
 
         dropped_here + dropped_below
+    }
+
+    /// Recursively builds `children`, whose post-scatter `cumulative_size` is the absolute window
+    /// end cursor into `grouped` (their indices laid out contiguously); `spare` is same length
+    /// scratch and `start` is the absolute offset of `grouped[0]`. Groups below
+    /// [`PARALLEL_BUILD_THRESHOLD`] points build sequentially (no fork overhead on the many tiny
+    /// deep nodes); larger ones split the child slice in half and recurse under a single
+    /// `rayon::join`.
+    fn build_children(
+        children: &mut [SPTree<'a, T, D>],
+        grouped: &mut [usize],
+        spare: &mut [usize],
+        start: usize,
+    ) -> usize {
+        if grouped.len() < PARALLEL_BUILD_THRESHOLD || children.len() == 1 {
+            let mut grouped = grouped;
+            let mut spare = spare;
+            let mut previous_end = start;
+            let mut dropped = 0;
+            for child in children.iter_mut() {
+                let count = child.cumulative_size as usize - previous_end;
+                previous_end += count;
+                let (mine, rest_grouped) = grouped.split_at_mut(count);
+                let (mys, rest_spare) = spare.split_at_mut(count);
+                grouped = rest_grouped;
+                spare = rest_spare;
+                if count != 0 {
+                    dropped += child.build(mine, mys);
+                } else {
+                    child.cumulative_size = 0;
+                }
+            }
+            return dropped;
+        }
+
+        let mid = children.len() / 2;
+
+        let split = children[mid - 1].cumulative_size as usize;
+        let left_len = split - start;
+        let (left_children, right_children) = children.split_at_mut(mid);
+        let (left_grouped, right_grouped) = grouped.split_at_mut(left_len);
+        let (left_spare, right_spare) = spare.split_at_mut(left_len);
+        let (dropped_left, dropped_right) = rayon::join(
+            || Self::build_children(left_children, left_grouped, left_spare, start),
+            || Self::build_children(right_children, right_grouped, right_spare, split),
+        );
+
+        dropped_left + dropped_right
     }
 
     /// The child cell containing point `index`, or `None` if a floating point crack leaves it
