@@ -496,7 +496,7 @@ where
                 .for_each(|(q, d)| *q = T::one() / (T::one() + *d));
 
             // Computes the exact gradient in parallel.
-            let q_values_sum: T = tsne::deterministic_sum(&self.q_values);
+            let q_values_sum: T = self.q_values.par_iter().copied().sum::<T>();
 
             // Immutable borrow to self must happen outside of the inner sequential
             // loop. The outer parallel loop already has a mutable borrow.
@@ -757,10 +757,8 @@ where
         // Per-sample contribution to the Q normalization term, reduced after the force pass.
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 
-        // Vector used to store the mean values for each embedding dimension. It's used
-        // to make the solution zero mean.
+        // Per-dimension means for the zero-mean recentering, reused across epochs.
         let mut means: Vec<T> = vec![T::zero(); D];
-
         // The callback is detached from self for the fit so the epoch loop is free
         // to borrow the other fields mutably; it is put back once the loop ends.
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
@@ -811,11 +809,13 @@ where
                     },
                 );
 
-            // Sequential q_sum: deterministic, barrier-free, and negligible against the forces.
+            // Sequential q_sum: barrier-free and negligible against the forces. The reciprocal is
+            // precomputed so the fused update multiplies instead of dividing per value.
             let q_sum: T = q_sums.iter().copied().sum();
+            let inverse_q_sum = T::one() / q_sum;
 
-            // Fuse the gradient (`positive - negative / q_sum`) into the gradient-descent update,
-            // so it needs no separate buffer or sweep.
+            // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
+            // update, so it needs no separate buffer or sweep.
             let learning_rate = self.learning_rate;
             let momentum = self.momentum;
             let gain_increment = T::from(0.2).unwrap();
@@ -836,7 +836,7 @@ where
                             .zip(uy_sample.iter_mut())
                             .zip(gains_sample.iter_mut())
                             .for_each(|((((y_el, pf), nf), uy_el), gain)| {
-                                let gradient = *pf - *nf / q_sum;
+                                let gradient = *pf - *nf * inverse_q_sum;
                                 *gain = if gradient.signum() != uy_el.signum() {
                                     *gain + gain_increment
                                 } else {
@@ -851,8 +851,8 @@ where
                     },
                 );
 
-            // Recenter (zero mean). The per-dimension sums accumulate sequentially (deterministic,
-            // barrier-free), so only the subtraction is a parallel pass.
+            // Recenter (zero mean). The per-dimension sums accumulate sequentially (barrier-free),
+            // so only the subtraction is a parallel pass.
             means.iter_mut().for_each(|mean| *mean = T::zero());
             self.y.chunks_exact(D).for_each(|sample| {
                 means
