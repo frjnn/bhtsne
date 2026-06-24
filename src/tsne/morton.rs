@@ -33,6 +33,7 @@ pub struct Dim<const D: usize>;
 
 /// Spreads the low 32 bits of `x` into the even bit positions (one zero gap between each), the
 /// 2D Morton building block.
+#[inline]
 fn part_1by1(mut x: u64) -> u64 {
     x &= 0x0000_0000_ffff_ffff;
     x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
@@ -43,6 +44,7 @@ fn part_1by1(mut x: u64) -> u64 {
 }
 
 /// Inverse of [`part_1by1`]: gathers the even bit positions back into the low 32 bits.
+#[inline]
 fn compact_1by1(mut x: u64) -> u64 {
     x &= 0x5555_5555_5555_5555;
     x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
@@ -53,6 +55,7 @@ fn compact_1by1(mut x: u64) -> u64 {
 }
 
 /// Spreads the low 21 bits of `x` so each lands three positions apart, the 3D Morton building block.
+#[inline]
 fn part_1by2(mut x: u64) -> u64 {
     x &= 0x1f_ffff;
     x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
@@ -63,6 +66,7 @@ fn part_1by2(mut x: u64) -> u64 {
 }
 
 /// Inverse of [`part_1by2`]: gathers every third bit back into the low 21 bits.
+#[inline]
 fn compact_1by2(mut x: u64) -> u64 {
     x &= 0x1249_2492_4924_9249;
     x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
@@ -76,10 +80,12 @@ impl Morton<2> for Dim<2> {
     const CHILDREN: usize = 4;
     const BITS: u32 = 32;
 
+    #[inline]
     fn encode(coords: [u32; 2]) -> u64 {
         part_1by1(coords[0] as u64) | (part_1by1(coords[1] as u64) << 1)
     }
 
+    #[inline]
     fn decode(code: u64) -> [u32; 2] {
         [compact_1by1(code) as u32, compact_1by1(code >> 1) as u32]
     }
@@ -89,12 +95,14 @@ impl Morton<3> for Dim<3> {
     const CHILDREN: usize = 8;
     const BITS: u32 = 21;
 
+    #[inline]
     fn encode(coords: [u32; 3]) -> u64 {
         part_1by2(coords[0] as u64)
             | (part_1by2(coords[1] as u64) << 1)
             | (part_1by2(coords[2] as u64) << 2)
     }
 
+    #[inline]
     fn decode(code: u64) -> [u32; 3] {
         [
             compact_1by2(code) as u32,
@@ -109,6 +117,7 @@ impl Morton<3> for Dim<3> {
 /// `min` is the per-axis lower corner and `inv_scale[axis] = 2^B / extent[axis]` (or `0` for a
 /// degenerate zero-width axis, which collapses to bucket `0`). The result is clamped to
 /// `[0, 2^B - 1]`, so the maximum coordinate maps to the last bucket rather than overflowing.
+#[inline]
 pub(crate) fn quantize<T: Float, const D: usize>(
     point: &[T],
     min: &[T; D],

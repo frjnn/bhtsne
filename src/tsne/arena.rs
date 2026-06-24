@@ -154,9 +154,12 @@ where
 
         // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
         // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
-        // node's window in `sorted` and is build scratch only.
-        let mut nodes: Vec<Node<T, D>> = Vec::new();
-        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        // node's window in `sorted` and is build scratch only. A compressed tree whose internal
+        // nodes each have at least two children holds at most `2 * n_samples - 1` nodes, so
+        // reserving that bound up front means neither vector reallocates during emission.
+        let capacity = 2 * n_samples;
+        let mut nodes: Vec<Node<T, D>> = Vec::with_capacity(capacity);
+        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(capacity);
         nodes.push(Node {
             center_of_mass: [T::zero(); D],
             count: n_samples as u32,
@@ -267,7 +270,7 @@ where
         // breadth-first range bookkeeping. Kept as a release assert because correctness is not
         // relaxed.
         let leaf_mass: u64 = nodes
-            .iter()
+            .par_iter()
             .filter(|node| node.first_child == SENTINEL)
             .map(|node| node.count as u64)
             .sum();
@@ -382,10 +385,15 @@ pub(crate) fn compute_edge_forces<T, const D: usize>(
 ) where
     T: Float + AddAssign,
 {
-    let sample = &y[index * D..index * D + D];
-    for entry in p_rows[index]..p_rows[index + 1] {
-        let other = p_columns[entry] as usize;
-        let other_sample = &y[other * D..other * D + D];
+    let sample: &[T; D] = (&y[index * D..index * D + D])
+        .try_into()
+        .expect("a point spans exactly D components");
+    let (start, end) = (p_rows[index], p_rows[index + 1]);
+    for (&column, &p_value) in p_columns[start..end].iter().zip(&p_values[start..end]) {
+        let other = column as usize;
+        let other_sample: &[T; D] = (&y[other * D..other * D + D])
+            .try_into()
+            .expect("a point spans exactly D components");
 
         let mut displacement = [T::zero(); D];
         let mut distance = T::zero();
@@ -394,7 +402,7 @@ pub(crate) fn compute_edge_forces<T, const D: usize>(
             displacement[axis] = delta;
             distance += delta * delta;
         }
-        let factor = p_values[entry] / (distance + T::one());
+        let factor = p_value / (distance + T::one());
         for axis in 0..D {
             positive_forces_row[axis] += factor * displacement[axis];
         }
