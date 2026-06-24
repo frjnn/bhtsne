@@ -276,15 +276,12 @@ pub(super) fn deterministic_sum<T: Float + Send + Sync + Sum>(values: &[T]) -> T
 /// # Arguments
 ///
 /// `p_values` - values of the P distribution.
-pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + DivAssign + Sum>(
-    p_values: &mut [T],
-) {
+pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(p_values: &mut [T]) {
     let p_values_sum: T = deterministic_sum(p_values);
-    let twelve = T::from(12.0).unwrap();
-    p_values.par_iter_mut().for_each(|p| {
-        *p /= p_values_sum + T::epsilon();
-        *p *= twelve;
-    });
+    // Fold the normalization and the early-exaggeration factor into one reciprocal, so the hot pass
+    // is a single multiply per value rather than a divide and a multiply.
+    let scale = T::from(12.0).unwrap() / (p_values_sum + T::epsilon());
+    p_values.par_iter_mut().for_each(|p| *p *= scale);
 }
 
 /// Symmetrizes a sparse P matrix.
@@ -493,6 +490,7 @@ where
     T: Float + Send + Sync + AddAssign + Add + DivAssign + Sum,
 {
     let mut distances: Vec<T> = vec![T::zero(); n_samples * n_samples];
+    let (points, _) = y.as_chunks::<D>();
     compute_pairwise_distance_matrix(
         &mut distances,
         |a: &[T; D], b: &[T; D]| {
@@ -501,7 +499,7 @@ where
                 .map(|(aa, bb)| (*aa - *bb).powi(2))
                 .sum::<T>()
         },
-        |i| (&y[i * D..(i + 1) * D]).try_into().unwrap(),
+        |i| &points[*i],
         n_samples,
     );
 
@@ -512,7 +510,10 @@ where
         .for_each(|(q, d)| *q = T::one() / (T::one() + *d));
 
     let q_sum = q_values.par_iter().map(|q| *q).sum::<T>();
-    q_values.par_iter_mut().for_each(|q| *q /= q_sum);
+    let inverse_q_sum = T::one() / q_sum;
+    q_values
+        .par_iter_mut()
+        .for_each(|q| *q = *q * inverse_q_sum);
 
     // Kullback-Leibler divergence.
     p_values
@@ -567,6 +568,7 @@ where
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
     };
+    let inverse_q_sum = T::one() / q_sum;
 
     let mut partials: Vec<T> = vec![T::zero(); n_samples];
 
@@ -583,7 +585,7 @@ where
                     .zip(sample_b.iter())
                     .map(|(a, b)| (*a - *b).powi(2))
                     .sum::<T>();
-                q = (T::one() / (T::one() + q)) / q_sum;
+                q = (T::one() / (T::one() + q)) * inverse_q_sum;
 
                 // Kullback-Leibler divergence.
                 *cost += p_values[index]

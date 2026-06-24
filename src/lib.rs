@@ -811,11 +811,13 @@ where
                     },
                 );
 
-            // Sequential q_sum: deterministic, barrier-free, and negligible against the forces.
+            // Sequential q_sum: deterministic, barrier-free, and negligible against the forces. The
+            // reciprocal is precomputed so the fused update multiplies instead of dividing per value.
             let q_sum: T = q_sums.iter().copied().sum();
+            let inverse_q_sum = T::one() / q_sum;
 
-            // Fuse the gradient (`positive - negative / q_sum`) into the gradient-descent update,
-            // so it needs no separate buffer or sweep.
+            // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
+            // update, so it needs no separate buffer or sweep.
             let learning_rate = self.learning_rate;
             let momentum = self.momentum;
             let gain_increment = T::from(0.2).unwrap();
@@ -836,7 +838,7 @@ where
                             .zip(uy_sample.iter_mut())
                             .zip(gains_sample.iter_mut())
                             .for_each(|((((y_el, pf), nf), uy_el), gain)| {
-                                let gradient = *pf - *nf / q_sum;
+                                let gradient = *pf - *nf * inverse_q_sum;
                                 *gain = if gradient.signum() != uy_el.signum() {
                                     *gain + gain_increment
                                 } else {
