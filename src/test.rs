@@ -99,8 +99,8 @@ fn kl_divergence_after_barnes_hut_is_finite_and_nonnegative() {
     assert!(kl.is_finite() && kl >= 0.0, "{kl}");
 }
 
-/// Smoke test for the parallel tree build and the force and reduction passes. N is above the
-/// parallel build threshold, so the children are genuinely built on the thread pool.
+/// Smoke test for the arena build and the force and reduction passes: the embedding stays finite
+/// and correctly sized after a short Barnes-Hut fit.
 #[test]
 fn parallel_barnes_hut_build_smoke() {
     const N: usize = 160;
@@ -950,36 +950,68 @@ fn barnes_hut_separates_clusters_at_large_input_scale() {
     );
 }
 
-/// Regression test for the parallel build, white box. The counting and scatter passes reuse each
-/// child's `cumulative_size` as a prefix cursor, so an empty child can be left holding a stale
-/// nonzero value. If the aggregation then treats it as real mass at the origin, the cell centres of
-/// mass are pulled off, corrupting the Barnes-Hut forces. This checks the structural invariants a
-/// correct build maintains: stored points stay inside their cells and each cell's centre of mass
-/// lies within the cell. `SPTree::new` additionally debug-asserts point conservation (leaf mass
-/// plus boundary-crack drops equals the input count). The tree is built over a 2D point cloud (the
-/// embedding space the real tree partitions), offset far from the origin so any centre of mass
-/// dragged toward it lands outside its cell. N is above the parallel build threshold.
+/// With neighbours supplied (so the vantage point tree's randomness is out of the picture) and a
+/// fixed seed, two Barnes-Hut runs must land in the same place. Determinism is relaxed for the
+/// arena (unstable sort, plain parallel reductions), so this is a tolerance check rather than a
+/// bit-for-bit one: the two embeddings must agree to within a small fraction of the embedding
+/// scale, which a correct and stable optimization satisfies. N is above the parallel code
+/// threshold, so the build runs in parallel.
 #[test]
-fn sptree_build_maintains_invariants() {
+fn barnes_hut_is_stable_run_to_run() {
+    const N: usize = 600;
+    const DIM: usize = 4;
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+    let seed = lcg_samples(N, NO_DIMS as usize, 99);
+
+    let run = || {
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
+            .epochs(150)
+            .initial_embedding(&seed[..])
+            .barnes_hut_with_neighbors(THETA, &neighbors);
+        tsne.embedding().to_vec()
+    };
+
+    let first = run();
+    let second = run();
+    let drift = mean_point_distance(&first, &second, NO_DIMS as usize);
+    let diagonal = bounding_box_diagonal(&first, NO_DIMS as usize);
+    assert!(
+        drift <= 0.05 * diagonal + 1e-4,
+        "two runs diverged: mean drift {drift} exceeds tolerance for diagonal {diagonal}"
+    );
+}
+
+/// Regression test for the parallel build, white box, the phantom-mass class. A corrupted
+/// aggregation that counts mass a cell does not hold (an empty orthant, a stale cursor) drags the
+/// cell centre of mass off, which this catches: every cell centre of mass must lie within its own
+/// Morton cell. Morton quantization makes point conservation automatic, which `Arena::new` asserts
+/// (the leaf masses sum to `n`), so the root mass equalling `n` confirms no point was lost or
+/// invented. The cloud is offset far from the origin so any centre of mass dragged toward it lands
+/// outside its cell. N is above the parallel code threshold.
+#[test]
+fn arena_build_maintains_invariants() {
     const N: usize = 2_000;
     let mut data = lcg_samples(N, 2, 17);
     for value in data.iter_mut() {
         *value += 100.0;
     }
 
-    let tree = tsne::sptree::SPTree::<f32, 2>::new(&data, N);
+    let arena = tsne::arena::Arena::<f32, 2>::new(&data, N);
 
-    assert!(tree.is_correct(), "stored points escaped their cells");
+    assert_eq!(arena.root_count(), N, "arena lost or invented points");
     assert!(
-        tree.centers_of_mass_within_cells(),
+        arena.centers_of_mass_within_cells(),
         "a cell centre of mass escaped its cell, the build aggregated phantom mass"
     );
 }
 
 /// End-to-end regression test for the same bug, reproducing the symptom directly: corrupted
 /// repulsive forces let attraction collapse the whole embedding onto a handful of coordinates. A
-/// healthy run spreads the points out, so most embedded positions are distinct. N is above the
-/// parallel build threshold.
+/// healthy run spreads the points out, so most embedded positions are distinct.
 #[test]
 fn barnes_hut_does_not_collapse_embedding() {
     use std::collections::HashSet;

@@ -1,4 +1,5 @@
-pub(super) mod sptree;
+pub(super) mod arena;
+pub(super) mod morton;
 pub(super) mod vptree;
 
 use std::{
@@ -281,14 +282,17 @@ pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(p_val
 /// * `n_neighbors` - number of nearest neighbors to consider.
 pub(super) fn symmetrize_sparse_matrix<T>(
     sym_p_rows: &mut Vec<usize>,
-    sym_p_columns: &mut Vec<usize>,
-    p_columns: Vec<usize>,
+    sym_p_columns: &mut Vec<u32>,
+    p_columns: Vec<u32>,
     p_values: &mut Vec<T>,
     n_samples: usize,
     n_neighbors: &usize,
 ) where
     T: Float + Add + DivAssign + Send + Sync + MulAssign,
 {
+    // Neighbor indices are stored as u32 to halve the index memory at large n; `col` reads one as a
+    // usize wherever it is used to index into a buffer.
+    let col = |i: usize| p_columns[i] as usize;
     // Each entry of row_counts corresponds to the number of elements for each corresponding row of
     // the symmetric sparse final P matrix.
     let mut row_counts: Vec<usize> = vec![0; n_samples];
@@ -301,8 +305,8 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     for n in 0..n_samples {
         for i in p_rows(n)..p_rows(n + 1) {
             row_counts[n] += 1;
-            if !p_columns[p_rows(p_columns[i])..p_rows(p_columns[i] + 1)].contains(&n) {
-                row_counts[p_columns[i]] += 1;
+            if !p_columns[p_rows(col(i))..p_rows(col(i) + 1)].contains(&(n as u32)) {
+                row_counts[col(i)] += 1;
             }
         }
     }
@@ -310,7 +314,7 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     let total: usize = row_counts.iter().sum();
 
     let mut sym_row_p: Vec<usize> = vec![0; n_samples + 1];
-    let mut sym_col_p: Vec<usize> = vec![0; total];
+    let mut sym_col_p: Vec<u32> = vec![0; total];
     let mut sym_val_p: Vec<T> = vec![T::zero(); total];
 
     sym_row_p[0] = 0;
@@ -325,31 +329,30 @@ pub(super) fn symmetrize_sparse_matrix<T>(
             // Check whether element (col_P[i], n) is present.
             let mut present: bool = false;
             // Considering element(n, col_P[i]).
-            for m in p_rows(p_columns[i])..p_rows(p_columns[i] + 1) {
-                if p_columns[m] == _n {
+            for m in p_rows(col(i))..p_rows(col(i) + 1) {
+                if col(m) == _n {
                     present = true;
                     // Make sure we do not add elements twice.
-                    if _n <= p_columns[i] {
+                    if _n <= col(i) {
                         sym_col_p[sym_row_p[_n] + offset[_n]] = p_columns[i];
-                        sym_col_p[sym_row_p[p_columns[i]] + offset[p_columns[i]]] = _n;
+                        sym_col_p[sym_row_p[col(i)] + offset[col(i)]] = _n as u32;
                         sym_val_p[sym_row_p[_n] + offset[_n]] = p_values[i] + p_values[m];
-                        sym_val_p[sym_row_p[p_columns[i]] + offset[p_columns[i]]] =
-                            p_values[i] + p_values[m];
+                        sym_val_p[sym_row_p[col(i)] + offset[col(i)]] = p_values[i] + p_values[m];
                     }
                 }
             }
             // If (col_P[i], n) is not present, there is no addition involved.
             if !present {
                 sym_col_p[sym_row_p[_n] + offset[_n]] = p_columns[i];
-                sym_col_p[sym_row_p[p_columns[i]] + offset[p_columns[i]]] = _n;
+                sym_col_p[sym_row_p[col(i)] + offset[col(i)]] = _n as u32;
                 sym_val_p[sym_row_p[_n] + offset[_n]] = p_values[i];
-                sym_val_p[sym_row_p[p_columns[i]] + offset[p_columns[i]]] = p_values[i];
+                sym_val_p[sym_row_p[col(i)] + offset[col(i)]] = p_values[i];
             }
             // Update offsets.
-            if !present || _n <= p_columns[i] {
+            if !present || _n <= col(i) {
                 offset[_n] += 1;
-                if p_columns[i] != _n {
-                    offset[p_columns[i]] += 1;
+                if col(i) != _n {
+                    offset[col(i)] += 1;
                 }
             }
         }
@@ -527,7 +530,7 @@ where
 /// * `theta` - threshold for the Barnes-Hut algorithm.
 pub(crate) fn evaluate_error_approximately<T, const D: usize>(
     p_rows: &[usize],
-    p_columns: &[usize],
+    p_columns: &[u32],
     p_values: &[T],
     y: &[T],
     n_samples: usize,
@@ -535,17 +538,26 @@ pub(crate) fn evaluate_error_approximately<T, const D: usize>(
 ) -> T
 where
     T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
+    morton::Dim<D>: morton::Morton<D>,
 {
     // Get estimate of normalization term.
     let q_sum = {
-        let tree = sptree::SPTree::<T, D>::new(y, n_samples);
+        let arena = arena::Arena::<T, D>::new(y, n_samples);
+        let theta_sq = theta * theta;
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 
         q_sums.par_iter_mut().enumerate().for_each(|(index, sum)| {
             // Local scratch: the repulsive forces are not needed here, only their q_sum.
-            let mut buffer = [T::zero(); D];
             let mut negative_forces = [T::zero(); D];
-            tree.compute_non_edge_forces(index, theta, &mut negative_forces, &mut buffer, sum);
+            let mut stack = [0u32; arena::STACK_CAP];
+            arena.compute_non_edge_forces(
+                index,
+                theta_sq,
+                y,
+                &mut negative_forces,
+                sum,
+                &mut stack,
+            );
         });
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
@@ -559,8 +571,9 @@ where
         .enumerate()
         .for_each(|(index, cost)| {
             let sample_a = &y[index * D..(index + 1) * D];
-            for n in p_rows[index]..p_rows[index + 1] {
-                let sample_b = &y[p_columns[n] * D..(p_columns[n] + 1) * D];
+            for &column in &p_columns[p_rows[index]..p_rows[index + 1]] {
+                let column = column as usize;
+                let sample_b = &y[column * D..(column + 1) * D];
 
                 let mut q = sample_a
                     .iter()

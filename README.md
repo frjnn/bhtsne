@@ -62,7 +62,9 @@ The implementation supports custom data types and custom defined metrics. For in
      .write_csv("iris_embedding.csv")?;
 ```
 
-In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in. 
+In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
+
+The tree-accelerated `barnes_hut` and `barnes_hut_with_neighbors` support an embedding dimensionality `D` of 2 or 3, the dimensionalities a `u64` Z-order code covers with ample precision. The exact `exact` path stays general for any `D`.
 
 ## Parallelism 
 Being built on [rayon](https://github.com/rayon-rs/rayon), the algorithm uses the same number of threads as the number of CPUs available. Do note that on systems with hyperthreading enabled this equals the number of logical cores and not the physical ones. See [rayon's FAQs](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for additional informations.
