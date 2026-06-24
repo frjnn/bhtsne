@@ -18,10 +18,6 @@ use rand_distr::{Distribution, Normal};
 
 use num_traits::{AsPrimitive, Float};
 
-/// Samples per block for the deterministic parallel reductions: blocks are summed sequentially in
-/// parallel and combined in index order, so the result is independent of the work-stealing schedule.
-const REDUCTION_BLOCK: usize = 1024;
-
 /// Checks whether the perplexity is too large for the number of samples.
 ///
 /// # Arguments
@@ -259,25 +255,13 @@ where
         .for_each(|p| *p /= p_values_row_sum + T::epsilon());
 }
 
-/// Deterministic parallel sum of `values`: fixed-size blocks are summed sequentially in parallel,
-/// then combined in index order, so the result does not depend on the work-stealing schedule.
-pub(super) fn deterministic_sum<T: Float + Send + Sync + Sum>(values: &[T]) -> T {
-    const BLOCK: usize = 4096;
-    values
-        .par_chunks(BLOCK)
-        .map(|block| block.iter().copied().sum::<T>())
-        .collect::<Vec<T>>()
-        .into_iter()
-        .fold(T::zero(), |total, partial| total + partial)
-}
-
 /// Normalizes the P values.
 ///
 /// # Arguments
 ///
 /// `p_values` - values of the P distribution.
 pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(p_values: &mut [T]) {
-    let p_values_sum: T = deterministic_sum(p_values);
+    let p_values_sum: T = p_values.par_iter().copied().sum::<T>();
     // Fold the normalization and the early-exaggeration factor into one reciprocal, so the hot pass
     // is a single multiply per value rather than a divide and a multiply.
     let scale = T::from(12.0).unwrap() / (p_values_sum + T::epsilon());
@@ -432,39 +416,37 @@ pub(super) fn update_solution<T>(
 /// # Arguments
 ///
 /// `p_values` - P distribution.
-pub(super) fn stop_lying<T: Float + Send + Sync + DivAssign>(p_values: &mut [T]) {
-    let twelve = T::from(12.0).unwrap();
-    p_values.par_iter_mut().for_each(|p| *p /= twelve);
+pub(super) fn stop_lying<T: Float + Send + Sync + MulAssign>(p_values: &mut [T]) {
+    let scale = T::one() / T::from(12.0).unwrap();
+    p_values.par_iter_mut().for_each(|p| *p *= scale);
 }
 
-/// Recenters `y` to zero mean. The per-dimension sums are reduced deterministically (fixed-size
-/// blocks summed in parallel, then combined in index order) and subtracted in parallel.
+/// Recenters `y` to zero mean. The per-dimension sums and the subtraction are both parallel passes.
 pub(super) fn zero_mean<T, const D: usize>(y: &mut [T], n_samples: usize)
 where
     T: Float + Send + Sync + Copy + AddAssign + DivAssign + SubAssign,
 {
-    let block_len = REDUCTION_BLOCK * D;
-    let partials: Vec<[T; D]> = y
-        .par_chunks(block_len)
-        .map(|block| {
-            let mut totals = [T::zero(); D];
-            block.chunks(D).for_each(|sample| {
+    let mut means = y
+        .par_chunks_exact(D)
+        .fold(
+            || [T::zero(); D],
+            |mut totals, sample| {
                 totals
                     .iter_mut()
                     .zip(sample.iter())
                     .for_each(|(total, el)| *total += *el);
-            });
-            totals
-        })
-        .collect();
-
-    let mut means = [T::zero(); D];
-    for partial in &partials {
-        means
-            .iter_mut()
-            .zip(partial.iter())
-            .for_each(|(mean, total)| *mean += *total);
-    }
+                totals
+            },
+        )
+        .reduce(
+            || [T::zero(); D],
+            |mut left, right| {
+                left.iter_mut()
+                    .zip(right.iter())
+                    .for_each(|(total, partial)| *total += *partial);
+                left
+            },
+        );
     let n_samples = T::from(n_samples).unwrap();
     means.iter_mut().for_each(|mean| *mean /= n_samples);
 
