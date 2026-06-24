@@ -64,6 +64,9 @@ use std::{error::Error, fs::File};
 
 use num_traits::{Float, cast::AsPrimitive};
 
+#[doc(hidden)]
+pub use tsne::morton::{Dim, Morton};
+
 use rayon::{
     iter::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
@@ -113,7 +116,7 @@ where
     perplexity: T,
     p_values: Vec<T>,
     p_rows: Vec<usize>,
-    p_columns: Vec<usize>,
+    p_columns: Vec<u32>,
     q_values: Vec<T>,
     y: Vec<T>,
     dy: Vec<T>,
@@ -372,7 +375,10 @@ where
     ///
     /// [`exact`]: tSNE::exact
     /// [`barnes_hut`]: tSNE::barnes_hut
-    pub fn kl_divergence(&self) -> Option<T> {
+    pub fn kl_divergence(&self) -> Option<T>
+    where
+        Dim<D>: Morton<D>,
+    {
         let n_samples = self.data.len();
         match self.fit.as_ref()? {
             Fit::Exact => Some(tsne::evaluate_error::<T, D>(
@@ -598,6 +604,7 @@ where
     pub fn barnes_hut<F>(&mut self, theta: T, metric_f: F) -> &mut Self
     where
         F: Fn(&U, &U) -> T + Send + Sync,
+        Dim<D>: Morton<D>,
     {
         // Validate before building the tree so misuse does not pay for it first.
         self.validate_fit_params(theta);
@@ -644,7 +651,10 @@ where
         &mut self,
         theta: T,
         neighbors: &[Vec<Neighbor<T>>],
-    ) -> &mut Self {
+    ) -> &mut Self
+    where
+        Dim<D>: Morton<D>,
+    {
         let n_samples = self.data.len();
         assert_eq!(
             neighbors.len(),
@@ -677,7 +687,7 @@ where
                 .zip(distances_row.iter_mut())
                 .zip(neighbors[index].iter())
                 .for_each(|((column, distance), neighbor)| {
-                    *column = neighbor.index;
+                    *column = neighbor.index as u32;
                     *distance = neighbor.distance;
                 });
         })
@@ -687,7 +697,8 @@ where
     /// writes sample `index`'s neighbor indices and distances; the rest is common.
     fn barnes_hut_fit<F>(&mut self, theta: T, n_neighbors: usize, fill_neighbors: F) -> &mut Self
     where
-        F: Fn(usize, &mut [usize], &mut [T]) + Send + Sync,
+        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
+        Dim<D>: Morton<D>,
     {
         // Idempotent: `barnes_hut` already validated before building its tree.
         self.validate_fit_params(theta);
@@ -713,7 +724,7 @@ where
         // an the elements of p_values: for each row i of length n_neighbors of such matrices it
         // holds that p_columns[i][j] corresponds to the index sample which contributes
         // to p_values[i][j]. This vector is freed inside symmetrize_sparse_matrix.
-        let mut p_columns: Vec<usize> = vec![0usize; pairwise_entries];
+        let mut p_columns: Vec<u32> = vec![0u32; pairwise_entries];
 
         // Fill the neighbor rows, then fit the per-point Gaussian bandwidth.
         {
@@ -729,7 +740,7 @@ where
                 .for_each(|(index, ((p_values_row, distances_row), p_columns_row))| {
                     // Writes the indices and the distances of the nearest neighbors of the sample.
                     fill_neighbors(index, p_columns_row, distances_row);
-                    debug_assert!(!p_columns_row.contains(&index));
+                    debug_assert!(!p_columns_row.contains(&(index as u32)));
                     tsne::search_beta(p_values_row, distances_row, perplexity);
                 });
         }
@@ -763,45 +774,58 @@ where
         // to borrow the other fields mutably; it is put back once the loop ends.
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
+        // The theta acceptance test uses the squared form, so precompute theta squared once.
+        let theta_sq = theta * theta;
+
         // Main Training loop.
         for epoch in 0..self.epochs {
-            // Construct space partitioning tree on the current embedding.
-            let tree = tsne::sptree::SPTree::<T, D>::new(&self.y, n_samples);
-            debug_assert!(tree.is_correct(), "error: SPTree is not correct.");
+            // Construct the Morton arena over the current embedding.
+            let arena = tsne::arena::Arena::<T, D>::new(&self.y, n_samples);
             debug_assert!(
-                tree.centers_of_mass_within_cells(),
-                "error: SPTree centre of mass escaped its cell."
+                arena.centers_of_mass_within_cells(),
+                "error: arena centre of mass escaped its cell."
             );
 
             // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its
-            // q_sum term. Coordinates come from the tree by index, scratch stays on the stack.
+            // q_sum term. The attractive pass reads coordinates directly, the repulsive pass walks
+            // the arena with a fixed-size stack. The stack lives in the `for_each_init` state, a
+            // stack-allocated array so the traversal never touches the heap: rayon calls the init
+            // once per work split, so a heap stack here would allocate per split and collapse the
+            // scaling at high thread counts.
             positive_forces
                 .par_chunks_mut(D)
                 .zip(negative_forces.par_chunks_mut(D))
                 .zip(q_sums.par_iter_mut())
                 .enumerate()
                 .for_each_init(
-                    || ([T::zero(); D], [T::zero(); D], [T::zero(); D]),
-                    |(edge_row, nonedge_row, buffer_row),
+                    || {
+                        (
+                            [T::zero(); D],
+                            [T::zero(); D],
+                            [0u32; tsne::arena::STACK_CAP],
+                        )
+                    },
+                    |(edge_row, nonedge_row, stack),
                      (index, ((positive_out, negative_out), q_sum_out))| {
                         // Write each output row once to avoid false sharing.
                         *edge_row = [T::zero(); D];
                         *nonedge_row = [T::zero(); D];
                         let mut q_sum = T::zero();
-                        tree.compute_edge_forces(
+                        tsne::arena::compute_edge_forces::<T, D>(
                             index,
+                            &self.y,
                             &self.p_rows,
                             &self.p_columns,
                             &self.p_values,
-                            buffer_row,
                             edge_row,
                         );
-                        tree.compute_non_edge_forces(
+                        arena.compute_non_edge_forces(
                             index,
-                            theta,
+                            theta_sq,
+                            &self.y,
                             nonedge_row,
-                            buffer_row,
                             &mut q_sum,
+                            stack,
                         );
                         positive_out.copy_from_slice(&edge_row[..]);
                         negative_out.copy_from_slice(&nonedge_row[..]);

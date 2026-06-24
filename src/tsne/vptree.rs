@@ -248,7 +248,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         target: &U,
         target_index: usize,
         k: usize,
-        neighbors_indices: &mut [usize],
+        neighbors_indices: &mut [u32],
         distances: &mut [T],
         metric_f: F,
     ) where
@@ -273,7 +273,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
             }))
             .for_each(|((idx, d), result)| {
                 let HeapItem { index, distance } = result;
-                *idx = *index;
+                *idx = *index as u32;
                 *d = *distance;
             });
     }
