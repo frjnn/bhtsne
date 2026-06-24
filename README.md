@@ -16,7 +16,7 @@ Additional implementations of the algorithm, including this one, are listed at [
 Add this line to your `Cargo.toml`:
 ```toml
 [dependencies]
-bhtsne = "0.5.12"
+bhtsne = "0.6.0"
 ```
 ### Documentation
 
@@ -37,7 +37,6 @@ The implementation supports custom data types and custom defined metrics. For in
 
  const PERPLEXITY: f32 = 10.0; // Perplexity of the conditional distribution.
  const EPOCHS: usize = 2000;   // Number of fitting iterations.
- const NO_DIMS: u8 = 2;        // Dimensionality of the embedded space.
  
  // Loads the data from a csv file skipping the first row,
  // treating it as headers and skipping the 5th column,
@@ -49,8 +48,7 @@ The implementation supports custom data types and custom defined metrics. For in
  let samples: Vec<&[f32]> = data.chunks(D).collect();
  // Executes the Barnes-Hut approximation of the algorithm and writes the embedding to the
  // specified csv file.
- bhtsne::tSNE::new(&samples)
-     .embedding_dim(NO_DIMS)
+ bhtsne::tSNE::<f32, &[f32], 2>::new(&samples)
      .perplexity(PERPLEXITY)
      .epochs(EPOCHS)
      .barnes_hut(THETA, |sample_a, sample_b| {

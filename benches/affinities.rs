@@ -30,9 +30,8 @@ fn bench_affinities(c: &mut Criterion) {
         // Vantage point tree path: builds the tree and queries it per sample.
         group.bench_with_input(BenchmarkId::new("vptree", n), &n, |b, _| {
             b.iter(|| {
-                let mut tsne = tSNE::new(&samples);
-                tsne.embedding_dim(2)
-                    .perplexity(PERPLEXITY)
+                let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+                tsne.perplexity(PERPLEXITY)
                     .epochs(0)
                     .barnes_hut(THETA, |a, b| euclidean(a, b));
                 black_box(tsne.embedding());
@@ -42,9 +41,8 @@ fn bench_affinities(c: &mut Criterion) {
         // Index-accelerated path: fills the rows from precomputed neighbors.
         group.bench_with_input(BenchmarkId::new("precomputed_neighbors", n), &n, |b, _| {
             b.iter(|| {
-                let mut tsne = tSNE::new(&samples);
-                tsne.embedding_dim(2)
-                    .perplexity(PERPLEXITY)
+                let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+                tsne.perplexity(PERPLEXITY)
                     .epochs(0)
                     .barnes_hut_with_neighbors(THETA, black_box(&neighbors));
                 black_box(tsne.embedding());
