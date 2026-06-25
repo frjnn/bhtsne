@@ -13,16 +13,15 @@
 use std::ops::AddAssign;
 
 use num_traits::Float;
+
 use rayon::prelude::*;
+
+use crate::PARALLEL_CODE_THRESHOLD;
 
 use super::morton::{Dim, Morton, quantize};
 
 /// `first_child` value marking a leaf, a node with no children in the arena.
 const SENTINEL: u32 = u32::MAX;
-
-/// Minimum chunk length for the parallel bounding-box and code passes, so small inputs are not
-/// split across the thread pool only to pay its overhead.
-const PARALLEL_CODE_THRESHOLD: usize = 4096;
 
 /// Capacity of the traversal stack. A root-to-leaf path crosses at most `BITS` internal cells (a
 /// child's level is strictly greater than its parent's), and each pushes at most `2^D - 1`
@@ -154,9 +153,12 @@ where
 
         // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
         // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
-        // node's window in `sorted` and is build scratch only.
-        let mut nodes: Vec<Node<T, D>> = Vec::new();
-        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        // node's window in `sorted` and is build scratch only. Every internal node has at least two
+        // children (single-child chains are skipped by the tightest-enclosing-level jump), so an
+        // arena over `n` points holds at most `2n - 1` nodes; reserving that up front lets the
+        // sequential emission push without reallocating as it grows, every epoch.
+        let mut nodes: Vec<Node<T, D>> = Vec::with_capacity(2 * n_samples - 1);
+        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(2 * n_samples - 1);
         nodes.push(Node {
             center_of_mass: [T::zero(); D],
             count: n_samples as u32,
@@ -219,6 +221,7 @@ where
         nodes
             .par_iter_mut()
             .zip(ranges.par_iter())
+            .with_min_len(PARALLEL_CODE_THRESHOLD)
             .for_each(|(node, &(start, end))| {
                 if node.first_child == SENTINEL {
                     let mut center = [T::zero(); D];
