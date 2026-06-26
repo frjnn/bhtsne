@@ -49,6 +49,19 @@ fn set_stop_lying_epoch() {
 }
 
 #[test]
+fn set_early_exaggeration() {
+    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    tsne.early_exaggeration(4.);
+    assert_eq!(tsne.early_exaggeration, 4.);
+}
+
+#[test]
+fn early_exaggeration_default_is_twelve() {
+    let tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    assert_eq!(tsne.early_exaggeration, 12.);
+}
+
+#[test]
 fn set_perplexity() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.perplexity(15.);
@@ -445,6 +458,107 @@ fn warm_start_begins_from_initial_embedding_exact() {
     assert!(
         random_displacement > 10.0 * displacement,
         "warm start indistinguishable from a random initialization: {displacement} against {random_displacement}"
+    );
+}
+
+/// Exact squared-euclidean distance used by the early-exaggeration fits below.
+fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+}
+
+/// Runs a short exact fit from a fixed seed and returns the embedding snapshot at
+/// the end of epoch `capture`, so two configurations can be compared at the same
+/// point of the optimization. `configure` sets the knob under test.
+fn exact_snapshot_at<F>(capture: usize, configure: F) -> Vec<f32>
+where
+    F: FnOnce(&mut tSNE<'_, f32, &[f32]>),
+{
+    const N: usize = 60;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 7);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+    let seed = lcg_samples(N, NO_DIMS as usize, 99);
+
+    let mut snapshot: Vec<f32> = Vec::new();
+    {
+        let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne.perplexity(PERPLEXITY)
+            .epochs(capture + 1)
+            .initial_embedding(&seed[..]);
+        configure(&mut tsne);
+        tsne.epoch_callback(|epoch, current| {
+            if epoch == capture {
+                snapshot.extend_from_slice(current);
+            }
+        })
+        .exact(|a, b| squared_euclidean(a, b));
+    }
+    snapshot
+}
+
+/// Setting the factor to its default `12.0` explicitly must match leaving it
+/// unset, so existing callers see no behavior change. The two runs execute the
+/// same arithmetic, so they may differ only by parallel-reduction noise, far
+/// below the embedding scale.
+#[test]
+fn early_exaggeration_explicit_twelve_matches_default() {
+    // Compare after a single step: the optimizer is chaotic, so even identical
+    // arithmetic diverges macroscopically over many epochs once parallel-reduction
+    // noise is amplified. One step isolates the behavior from that amplification.
+    let default_run = exact_snapshot_at(0, |_tsne| {});
+    let explicit_run = exact_snapshot_at(0, |tsne| {
+        tsne.early_exaggeration(12.0);
+    });
+
+    let dim = NO_DIMS as usize;
+    let drift = mean_point_distance(&default_run, &explicit_run, dim);
+    let diagonal = bounding_box_diagonal(&default_run, dim);
+    assert!(
+        drift <= 1e-4 * diagonal + 1e-6,
+        "explicit 12.0 strayed {drift} from the default, diagonal {diagonal}"
+    );
+}
+
+/// The factor must reach the optimizer: two fits differing only in
+/// `early_exaggeration` pull the embedding apart by different amounts in the
+/// early epochs, so their first-epoch snapshots are measurably different.
+#[test]
+fn early_exaggeration_changes_early_embedding() {
+    let strong = exact_snapshot_at(0, |tsne| {
+        tsne.early_exaggeration(12.0);
+    });
+    let weak = exact_snapshot_at(0, |tsne| {
+        tsne.early_exaggeration(4.0);
+    });
+
+    let dim = NO_DIMS as usize;
+    let difference = mean_point_distance(&strong, &weak, dim);
+    let diagonal = bounding_box_diagonal(&strong, dim);
+    assert!(
+        difference > 0.05 * diagonal,
+        "exaggeration 12.0 against 4.0 barely moved the first epoch: {difference} against diagonal {diagonal}"
+    );
+}
+
+/// `early_exaggeration(1.0)` is a second way to express "no exaggeration": it must
+/// produce the same first epoch as `stop_lying_epoch(0)`, which normalizes then
+/// undoes the lying immediately. Both leave the `P` distribution unexaggerated.
+#[test]
+fn early_exaggeration_one_matches_stop_lying_zero() {
+    let no_exaggeration = exact_snapshot_at(0, |tsne| {
+        tsne.early_exaggeration(1.0);
+    });
+    let lying_disabled = exact_snapshot_at(0, |tsne| {
+        tsne.stop_lying_epoch(0);
+    });
+
+    let dim = NO_DIMS as usize;
+    let drift = mean_point_distance(&no_exaggeration, &lying_disabled, dim);
+    let diagonal = bounding_box_diagonal(&no_exaggeration, dim);
+    assert!(
+        drift <= 1e-4 * diagonal + 1e-6,
+        "the two no-exaggeration paths diverged: {drift} against diagonal {diagonal}"
     );
 }
 

@@ -123,6 +123,7 @@ where
     final_momentum: T,
     momentum_switch_epoch: usize,
     stop_lying_epoch: usize,
+    early_exaggeration: T,
     perplexity: T,
     p_values: Vec<T>,
     p_rows: Vec<usize>,
@@ -164,6 +165,7 @@ where
     /// * `momentum = 0.5`
     /// * `final_momentum = 0.8`
     /// * `stop_lying_epoch = 250`
+    /// * `early_exaggeration = 12.0`
     /// * embedding space dimensionality `D = 2` (the trailing const generic of [`tSNE`])
     /// * `perplexity = 20.0`
     /// * `random_init = false`
@@ -208,6 +210,7 @@ where
             final_momentum: T::from(0.8).unwrap(),
             momentum_switch_epoch: 250,
             stop_lying_epoch: 250,
+            early_exaggeration: T::from(12.0).unwrap(),
             perplexity: T::from(20.0).unwrap(),
             p_values: Vec::new(),
             p_rows: Vec::new(),
@@ -281,7 +284,7 @@ where
 
     /// Sets a new stop lying epoch, i.e. the epoch after which the P distribution values become
     /// true, as defined in the original implementation. For epochs < `stop_lying_epoch` the values
-    /// of the P distribution are multiplied by a factor equal to `12.0`.
+    /// of the P distribution are multiplied by the `early_exaggeration` factor (`12.0` by default).
     ///
     /// A value of `0` disables the early exaggeration entirely, useful when warm starting from an
     /// already converged embedding.
@@ -291,6 +294,20 @@ where
     /// `stop_lying_epoch` - new value for the stop lying epoch.
     pub fn stop_lying_epoch(&mut self, stop_lying_epoch: usize) -> &mut Self {
         self.stop_lying_epoch = stop_lying_epoch;
+
+        self
+    }
+
+    /// Sets the early exaggeration factor, the multiplier applied to the `P`
+    /// distribution for epochs before `stop_lying_epoch`. Larger values push
+    /// clusters further apart early on. The original recipe uses `12.0`. A value
+    /// of `1.0` disables exaggeration (equivalent to `stop_lying_epoch(0)`).
+    ///
+    /// # Arguments
+    ///
+    /// `early_exaggeration` - new value for the early exaggeration factor.
+    pub fn early_exaggeration(&mut self, early_exaggeration: T) -> &mut Self {
+        self.early_exaggeration = early_exaggeration;
 
         self
     }
@@ -578,10 +595,10 @@ where
     /// embedding. Shared by `exact` and `barnes_hut_fit`.
     fn finalize_p_and_seed(&mut self, grad_entries: usize) {
         // Normalize P values.
-        tsne::normalize_p_values(&mut self.p_values);
+        tsne::normalize_p_values(&mut self.p_values, self.early_exaggeration);
         // With no early exaggeration phase, undo the lying immediately.
         if self.stop_lying_epoch == 0 {
-            tsne::stop_lying(&mut self.p_values);
+            tsne::stop_lying(&mut self.p_values, self.early_exaggeration);
         }
 
         // Seed from the supplied embedding if any, otherwise initialize randomly.
@@ -960,7 +977,7 @@ where
         snapshot: &mut [T],
     ) {
         if epoch == self.stop_lying_epoch && epoch != 0 {
-            tsne::stop_lying(&mut self.p_values);
+            tsne::stop_lying(&mut self.p_values, self.early_exaggeration);
         }
         if epoch == self.momentum_switch_epoch {
             self.momentum = self.final_momentum;
