@@ -117,7 +117,7 @@ where
     U: Send + Sync,
 {
     data: &'data [U],
-    learning_rate: T,
+    learning_rate: Option<T>,
     epochs: usize,
     momentum: T,
     final_momentum: T,
@@ -160,7 +160,7 @@ where
     /// According to the original implementation, the following configuration is provided by
     /// default:
     ///
-    /// * `learning_rate = 200`
+    /// * `learning_rate = auto` (`max(n_samples / early_exaggeration / 4, 50)`)
     /// * `epochs = 1000`
     /// * `momentum = 0.5`
     /// * `final_momentum = 0.8`
@@ -204,7 +204,7 @@ where
     pub fn new(data: &'data [U]) -> Self {
         Self {
             data,
-            learning_rate: T::from(200.0).unwrap(),
+            learning_rate: None,
             epochs: 1000,
             momentum: T::from(0.5).unwrap(),
             final_momentum: T::from(0.8).unwrap(),
@@ -226,13 +226,17 @@ where
         }
     }
 
-    /// Sets a new learning rate.
+    /// Sets an explicit learning rate, overriding the size-scaled default.
+    ///
+    /// When left unset the learning rate defaults to
+    /// `max(n_samples / early_exaggeration / 4, 50)`, following scikit-learn and
+    /// openTSNE, which adapts the step size to the dataset.
     ///
     /// # Arguments
     ///
     /// `learning_rate` - new value for the learning rate.
     pub fn learning_rate(&mut self, learning_rate: T) -> &mut Self {
-        self.learning_rate = learning_rate;
+        self.learning_rate = Some(learning_rate);
 
         self
     }
@@ -503,6 +507,9 @@ where
         // Normalize P, disable the early exaggeration if requested, and seed the embedding.
         self.finalize_p_and_seed(grad_entries);
 
+        // Resolve the learning rate once: explicit if set, otherwise size-scaled.
+        let learning_rate = self.resolve_learning_rate(n_samples);
+
         // The callback is detached from self for the fit so the epoch loop is free
         // to borrow the other fields mutably; it is put back once the loop ends.
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
@@ -570,7 +577,7 @@ where
                 &self.dy,
                 &mut self.uy,
                 &mut self.gains,
-                &self.learning_rate,
+                &learning_rate,
                 &self.momentum,
             );
 
@@ -589,6 +596,17 @@ where
         self.fit = Some(Fit::Exact);
 
         self
+    }
+
+    /// Resolves the learning rate: the explicit value if set, otherwise the
+    /// size-scaled `max(n_samples / early_exaggeration / 4, 50)` default, as used
+    /// by scikit-learn and openTSNE.
+    fn resolve_learning_rate(&self, n_samples: usize) -> T {
+        self.learning_rate.unwrap_or_else(|| {
+            let auto =
+                T::from(n_samples).unwrap() / self.early_exaggeration / T::from(4.0).unwrap();
+            auto.max(T::from(50.0).unwrap())
+        })
     }
 
     /// Normalizes P, undoes the early exaggeration if disabled, and seeds the
@@ -870,7 +888,7 @@ where
 
             // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
             // update, so it needs no separate buffer or sweep.
-            let learning_rate = self.learning_rate;
+            let learning_rate = self.resolve_learning_rate(n_samples);
             let momentum = self.momentum;
             let gain_increment = T::from(0.2).unwrap();
             let gain_decay = T::from(0.8).unwrap();

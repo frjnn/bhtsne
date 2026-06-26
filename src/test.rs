@@ -10,7 +10,58 @@ const NO_DIMS: u8 = 2;
 fn set_learning_rate() {
     let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
     tsne.learning_rate(15.);
-    assert_eq!(tsne.learning_rate, 15.);
+    assert_eq!(tsne.learning_rate, Some(15.));
+}
+
+#[test]
+fn learning_rate_defaults_to_unset() {
+    let tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    assert_eq!(tsne.learning_rate, None);
+}
+
+#[test]
+fn auto_learning_rate_hits_the_floor_for_small_n() {
+    // 100 / 12 / 4 is about 2.08, well below the floor, so the rate clamps to 50.
+    let tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    assert_eq!(tsne.resolve_learning_rate(100), 50.0);
+}
+
+#[test]
+fn auto_learning_rate_scales_with_n() {
+    // Above the floor the rate is exactly n / early_exaggeration / 4.
+    let tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    assert_eq!(tsne.resolve_learning_rate(120_000), 120_000.0 / 12.0 / 4.0);
+}
+
+#[test]
+fn explicit_learning_rate_overrides_the_auto_default() {
+    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    tsne.learning_rate(123.0);
+    assert_eq!(tsne.resolve_learning_rate(100), 123.0);
+    assert_eq!(tsne.resolve_learning_rate(1_000_000), 123.0);
+}
+
+#[test]
+fn auto_learning_rate_is_coupled_to_early_exaggeration() {
+    let mut tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    let with_default = tsne.resolve_learning_rate(120_000);
+    tsne.early_exaggeration(6.0);
+    let with_half = tsne.resolve_learning_rate(120_000);
+    // Halving the exaggeration doubles the auto rate (both are above the floor).
+    assert_eq!(with_half, 2.0 * with_default);
+}
+
+/// Calibration guard: at n = 10000 with the default factor the auto rate lands
+/// near the historical fixed 200, confirming the divisor convention. A wrong
+/// divisor would move this far out of band.
+#[test]
+fn auto_learning_rate_matches_historical_default_at_ten_thousand() {
+    let tsne: tSNE<f32, f32> = tSNE::new(&[0.]);
+    let rate = tsne.resolve_learning_rate(10_000);
+    assert!(
+        (205.0..=212.0).contains(&rate),
+        "auto rate at n=10000 is {rate}, expected close to 208 (= 10000 / 12 / 4)"
+    );
 }
 
 #[test]
