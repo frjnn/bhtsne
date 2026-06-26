@@ -75,6 +75,10 @@ use rayon::{
     slice::{ParallelSlice, ParallelSliceMut},
 };
 
+/// Minimum sample count before the Barnes-Hut per-epoch light passes (the fused gradient update and
+/// the zero-mean recentering) fan out across the thread pool.
+const PARALLEL_CODE_THRESHOLD: usize = 4096;
+
 /// Boxed closure invoked at the end of each fitting epoch with the epoch index and a
 /// snapshot of the current embedding. See [`tSNE::epoch_callback`].
 ///
@@ -89,6 +93,12 @@ enum Fit<T> {
     Exact,
     BarnesHut { theta: T },
 }
+
+/// Used by the fused update.
+type UpdateRow<'a, T> = (
+    (((&'a mut [T], &'a [T]), &'a [T]), &'a mut [T]),
+    &'a mut [T],
+);
 
 /// A sample's nearest neighbor for [`tSNE::barnes_hut_with_neighbors`]: its index
 /// and the distance (not a similarity) to it.
@@ -503,6 +513,9 @@ where
 
             // Computes the exact gradient in parallel.
             let q_values_sum: T = self.q_values.par_iter().copied().sum::<T>();
+            // Precompute the reciprocal so the n^2 inner gradient terms multiply by it instead of
+            // each dividing by the same sum, mirroring the Barnes-Hut path's `inverse_q_sum`.
+            let inverse_q_sum = q_values_sum.recip();
 
             // Immutable borrow to self must happen outside of the inner sequential
             // loop. The outer parallel loop already has a mutable borrow.
@@ -522,7 +535,7 @@ where
                             .zip(y.chunks(D))
                             .for_each(|((&p, &q), other_sample)| {
                                 let other_sample: &[T; D] = other_sample.try_into().unwrap();
-                                let m: T = (p - q / q_values_sum) * q;
+                                let m: T = (p - q * inverse_q_sum) * q;
                                 dy_sample
                                     .iter_mut()
                                     .zip(y_sample.iter())
@@ -847,33 +860,33 @@ where
             let min_gain = T::from(0.01).unwrap();
             self.y
                 .par_chunks_mut(D)
+                .with_min_len(PARALLEL_CODE_THRESHOLD)
                 .zip(positive_forces.par_chunks(D))
                 .zip(negative_forces.par_chunks(D))
                 .zip(self.uy.par_chunks_mut(D))
                 .zip(self.gains.par_chunks_mut(D))
-                .for_each(
-                    |((((y_sample, positive), negative), uy_sample), gains_sample)| {
-                        y_sample
-                            .iter_mut()
-                            .zip(positive.iter())
-                            .zip(negative.iter())
-                            .zip(uy_sample.iter_mut())
-                            .zip(gains_sample.iter_mut())
-                            .for_each(|((((y_el, pf), nf), uy_el), gain)| {
-                                let gradient = *pf - *nf * inverse_q_sum;
-                                *gain = if gradient.signum() != uy_el.signum() {
-                                    *gain + gain_increment
-                                } else {
-                                    *gain * gain_decay
-                                };
-                                if *gain < min_gain {
-                                    *gain = min_gain;
-                                }
-                                *uy_el = momentum * *uy_el - learning_rate * *gain * gradient;
-                                *y_el += *uy_el;
-                            });
-                    },
-                );
+                .for_each(|row: UpdateRow<'_, T>| {
+                    let ((((y_sample, positive), negative), uy_sample), gains_sample) = row;
+                    y_sample
+                        .iter_mut()
+                        .zip(positive.iter())
+                        .zip(negative.iter())
+                        .zip(uy_sample.iter_mut())
+                        .zip(gains_sample.iter_mut())
+                        .for_each(|((((y_el, pf), nf), uy_el), gain)| {
+                            let gradient = *pf - *nf * inverse_q_sum;
+                            *gain = if gradient.signum() != uy_el.signum() {
+                                *gain + gain_increment
+                            } else {
+                                *gain * gain_decay
+                            };
+                            if *gain < min_gain {
+                                *gain = min_gain;
+                            }
+                            *uy_el = momentum * *uy_el - learning_rate * *gain * gradient;
+                            *y_el += *uy_el;
+                        });
+                });
 
             // Recenter (zero mean). The per-dimension sums accumulate sequentially (barrier-free),
             // so only the subtraction is a parallel pass.
@@ -884,14 +897,17 @@ where
                     .zip(sample.iter())
                     .for_each(|(mean, &value)| *mean += value);
             });
-            let n = T::from(n_samples).unwrap();
-            means.iter_mut().for_each(|mean| *mean /= n);
-            self.y.par_chunks_mut(D).for_each(|sample| {
-                sample
-                    .iter_mut()
-                    .zip(means.iter())
-                    .for_each(|(value, &mean)| *value -= mean);
-            });
+            let den = T::from(n_samples).unwrap().recip();
+            means.iter_mut().for_each(|mean| *mean *= den);
+            self.y
+                .par_chunks_mut(D)
+                .with_min_len(PARALLEL_CODE_THRESHOLD)
+                .for_each(|sample| {
+                    sample
+                        .iter_mut()
+                        .zip(means.iter())
+                        .for_each(|(value, &mean)| *value -= mean);
+                });
 
             self.epoch_tail(epoch, &mut epoch_callback, &mut snapshot);
         }

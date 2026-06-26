@@ -33,6 +33,7 @@ pub struct Dim<const D: usize>;
 
 /// Spreads the low 32 bits of `x` into the even bit positions (one zero gap between each), the
 /// 2D Morton building block.
+#[inline]
 fn part_1by1(mut x: u64) -> u64 {
     x &= 0x0000_0000_ffff_ffff;
     x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
@@ -43,6 +44,7 @@ fn part_1by1(mut x: u64) -> u64 {
 }
 
 /// Inverse of [`part_1by1`]: gathers the even bit positions back into the low 32 bits.
+#[inline]
 fn compact_1by1(mut x: u64) -> u64 {
     x &= 0x5555_5555_5555_5555;
     x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
@@ -53,6 +55,7 @@ fn compact_1by1(mut x: u64) -> u64 {
 }
 
 /// Spreads the low 21 bits of `x` so each lands three positions apart, the 3D Morton building block.
+#[inline]
 fn part_1by2(mut x: u64) -> u64 {
     x &= 0x1f_ffff;
     x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
@@ -63,6 +66,7 @@ fn part_1by2(mut x: u64) -> u64 {
 }
 
 /// Inverse of [`part_1by2`]: gathers every third bit back into the low 21 bits.
+#[inline]
 fn compact_1by2(mut x: u64) -> u64 {
     x &= 0x1249_2492_4924_9249;
     x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
@@ -76,8 +80,8 @@ impl Morton<2> for Dim<2> {
     const CHILDREN: usize = 4;
     const BITS: u32 = 32;
 
-    fn encode(coords: [u32; 2]) -> u64 {
-        part_1by1(coords[0] as u64) | (part_1by1(coords[1] as u64) << 1)
+    fn encode([c0, c1]: [u32; 2]) -> u64 {
+        part_1by1(c0 as u64) | (part_1by1(c1 as u64) << 1)
     }
 
     fn decode(code: u64) -> [u32; 2] {
@@ -89,10 +93,8 @@ impl Morton<3> for Dim<3> {
     const CHILDREN: usize = 8;
     const BITS: u32 = 21;
 
-    fn encode(coords: [u32; 3]) -> u64 {
-        part_1by2(coords[0] as u64)
-            | (part_1by2(coords[1] as u64) << 1)
-            | (part_1by2(coords[2] as u64) << 2)
+    fn encode([c0, c1, c2]: [u32; 3]) -> u64 {
+        part_1by2(c0 as u64) | (part_1by2(c1 as u64) << 1) | (part_1by2(c2 as u64) << 2)
     }
 
     fn decode(code: u64) -> [u32; 3] {

@@ -147,19 +147,15 @@ pub(super) fn compute_pairwise_distance_matrix<'a, T, U, F, G>(
     F: Fn(&U, &U) -> T + Sync + Send,
     G: Fn(&usize) -> &'a U + Sync + Send,
 {
+    // Parallelize over rows and compute only the upper triangular entries, excluding the diagonal.
     distances
-        .par_iter_mut()
+        .par_chunks_mut(n_samples)
         .enumerate()
-        .map(|(index, d)| {
-            // Picks upper triangular entries excluding the diagonal ones.
-            let row_index = index / n_samples;
-            let column_index = index % n_samples;
-
-            (row_index, column_index, d)
-        })
-        .filter(|(row_index, column_index, _)| row_index < column_index)
-        .for_each(|(i, j, d)| {
-            *d = f(g(&i), g(&j));
+        .for_each(|(i, distances_row)| {
+            let ith = g(&i);
+            for (j, d) in distances_row.iter_mut().enumerate().skip(i + 1) {
+                *d = f(ith, g(&j));
+            }
         });
 
     // Symmetrizes the matrix. Effectively filling it.
@@ -202,7 +198,7 @@ where
             .iter_mut()
             .zip(distances_row.iter())
             .for_each(|(p, d)| {
-                *p = (-beta * d.powi(2)).exp();
+                *p = (-beta * (*d * *d)).exp();
             });
 
         // After that the row is normalized.
@@ -213,7 +209,7 @@ where
         let mut entropy = p_values_row
             .iter()
             .zip(distances_row.iter())
-            .fold(T::zero(), |acc, (p, d)| acc + beta * *p * d.powi(2));
+            .fold(T::zero(), |acc, (p, d)| acc + beta * *p * (*d * *d));
         entropy = entropy / p_values_row_sum + p_values_row_sum.ln();
 
         // It evaluates whether the entropy is within the tolerance level.
