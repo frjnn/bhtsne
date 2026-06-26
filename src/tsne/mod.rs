@@ -256,12 +256,17 @@ where
 ///
 /// # Arguments
 ///
-/// `p_values` - values of the P distribution.
-pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(p_values: &mut [T]) {
+/// * `p_values` - values of the P distribution.
+///
+/// * `early_exaggeration` - factor the P distribution is multiplied by during the early phase.
+pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(
+    p_values: &mut [T],
+    early_exaggeration: T,
+) {
     let p_values_sum: T = p_values.par_iter().copied().sum::<T>();
     // Fold the normalization and the early-exaggeration factor into one reciprocal, so the hot pass
     // is a single multiply per value rather than a divide and a multiply.
-    let scale = T::from(12.0).unwrap() / (p_values_sum + T::epsilon());
+    let scale = early_exaggeration / (p_values_sum + T::epsilon());
     p_values.par_iter_mut().for_each(|p| *p *= scale);
 }
 
@@ -414,9 +419,14 @@ pub(super) fn update_solution<T>(
 ///
 /// # Arguments
 ///
-/// `p_values` - P distribution.
-pub(super) fn stop_lying<T: Float + Send + Sync + MulAssign>(p_values: &mut [T]) {
-    let scale = T::one() / T::from(12.0).unwrap();
+/// * `p_values` - P distribution.
+///
+/// * `early_exaggeration` - factor the early phase multiplied the P distribution by, undone here.
+pub(super) fn stop_lying<T: Float + Send + Sync + MulAssign>(
+    p_values: &mut [T],
+    early_exaggeration: T,
+) {
+    let scale = T::one() / early_exaggeration;
     p_values.par_iter_mut().for_each(|p| *p *= scale);
 }
 
