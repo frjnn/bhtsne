@@ -1,3 +1,5 @@
 /target
 Cargo.lock
 .DS_Store
+mnist_pca20_tsne.csv
+mnist_pca20_tsne.png
