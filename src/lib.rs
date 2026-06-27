@@ -1130,6 +1130,7 @@ where
     where
         Dim<D>: Morton<D>,
     {
+        self.stop_lying_fired = false;
         let grad_entries = n_samples * D;
         self.y.resize(grad_entries, T::zero());
         self.uy.resize(grad_entries, T::zero());

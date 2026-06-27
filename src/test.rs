@@ -1615,3 +1615,71 @@ fn cached_affinities_invalidated_on_perplexity_change() {
         "embeddings are identical: perplexity change did not invalidate cache",
     );
 }
+/// Running barnes_hut twice on the same instance (second run hits the
+/// cached-affinities path) must produce the same result as running on a fresh
+/// instance with injected affinities. If `stop_lying_fired` is not reset before
+/// the second run, `stop_lying` never fires and the exaggeration is never
+/// removed, producing a different embedding.
+#[test]
+fn cached_affinities_reset_stop_lying_flag() {
+    const N: usize = 80;
+    const SL_EPOCH: usize = 5;
+    const RUN_EPOCHS: usize = 20;
+
+    let data = lcg_samples(N, D, 42);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+
+    // Reference run to build affinities.
+    let mut tsne_ref: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_ref.perplexity(PERPLEXITY);
+    tsne_ref.barnes_hut_with_neighbors(THETA, &neighbors);
+    let affinities = tsne_ref.affinities().unwrap();
+
+    // Seed from a preliminary run.
+    let mut tsne_seed: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_seed.perplexity(PERPLEXITY).epochs(20);
+    tsne_seed.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let seed = tsne_seed.embedding();
+
+    // Single-thread pool for deterministic reductions.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let (result_a, result_b) = pool.install(|| {
+        // Path A: fresh instance with injected affinities.
+        // stop_lying_fired starts false; stop_lying fires at SL_EPOCH.
+        let mut tsne_a: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne_a
+            .perplexity(PERPLEXITY)
+            .with_affinities(affinities.clone())
+            .stop_lying_epoch(SL_EPOCH)
+            .epochs(RUN_EPOCHS)
+            .initial_embedding(seed.clone());
+        tsne_a.barnes_hut_with_neighbors(THETA, &neighbors);
+        let result_a = tsne_a.embedding();
+
+        // Path B: run twice on the same instance.
+        // First run sets stop_lying_fired = true.
+        // Second run should reset it; if not, stop_lying never fires.
+        let mut tsne_b: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne_b
+            .perplexity(PERPLEXITY)
+            .stop_lying_epoch(SL_EPOCH)
+            .epochs(RUN_EPOCHS);
+        tsne_b.barnes_hut_with_neighbors(THETA, &neighbors);
+        tsne_b.epochs(RUN_EPOCHS).initial_embedding(seed);
+        tsne_b.barnes_hut_with_neighbors(THETA, &neighbors);
+        let result_b = tsne_b.embedding();
+
+        (result_a, result_b)
+    });
+
+    assert_eq!(
+        result_a, result_b,
+        "second cached-affinities run produced different embedding: stop_lying_fired was not reset",
+    );
+}
