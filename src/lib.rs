@@ -734,8 +734,13 @@ where
             "error: every neighbors row must have the same length, greater than zero."
         );
 
-        // These indices later index P rows in symmetrize_sparse_matrix; reject
-        // out-of-range here instead of panicking cryptically there.
+        // If cached affinities encode the same neighbors, reuse them.
+        // Indices are provably valid from the run that produced the cache.
+        if self.cached_affinities_match_neighbors(neighbors) {
+            return self.run_cached_affinities(theta, n_samples);
+        }
+
+        // Cache miss: indices will be used, validate them.
         assert!(
             neighbors
                 .iter()
@@ -743,11 +748,6 @@ where
                 .all(|neighbor| neighbor.index < n_samples),
             "error: a neighbor index is out of range, every index must be < n_samples = {n_samples}."
         );
-
-        // If cached affinities encode the same neighbors, reuse them.
-        if self.cached_affinities_match_neighbors(neighbors) {
-            return self.run_cached_affinities(theta, n_samples);
-        }
 
         self.barnes_hut_fit(theta, n_neighbors, |index, p_columns_row, distances_row| {
             p_columns_row
