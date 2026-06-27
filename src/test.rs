@@ -1,4 +1,5 @@
 use super::{Neighbor, tSNE, tsne};
+use rand::Rng;
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
@@ -1213,5 +1214,332 @@ fn barnes_hut_does_not_collapse_embedding() {
         distinct.len() > N / 2,
         "embedding collapsed: only {} distinct positions for {N} points",
         distinct.len()
+    );
+}
+
+/// Round trip: run barnes_hut, extract affinities, inject them with initial_embedding
+/// into a second tSNE, and call barnes_hut again. The continuation stays closer
+/// to the seed than a random-init run, and cluster structure is preserved.
+#[test]
+fn affinities_round_trip_barnes_hut() {
+    const N: usize = 200;
+    let data = lcg_samples(N, D, 42);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    // First run.
+    let mut tsne1: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne1
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding1 = tsne1.embedding();
+    let affinities = tsne1.affinities().expect("should have affinities");
+
+    // Second run: warm start with affinities.
+    let mut tsne2: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne2
+        .perplexity(PERPLEXITY)
+        .epochs(500)
+        .initial_embedding(embedding1.clone())
+        .with_affinities(affinities);
+    tsne2.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding2 = tsne2.embedding();
+
+    // The continuation must start near the seed, not restart from random.
+    // Compare against a fresh random-init run: the warm-start embedding
+    // should be closer to the seed than a random run would be.
+    let mut tsne_rand: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_rand
+        .perplexity(PERPLEXITY)
+        .epochs(500)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding_rand = tsne_rand.embedding();
+
+    let dist_warm = mean_point_distance(&embedding1, &embedding2, D);
+    let dist_rand = mean_point_distance(&embedding1, &embedding_rand, D);
+    assert!(
+        dist_warm < dist_rand,
+        "warm start ({}) should be closer to seed than random ({})",
+        dist_warm,
+        dist_rand,
+    );
+
+    // Cluster structure should be preserved: relative ordering of nearby points
+    // should be similar.
+    let data10 = &data[..D * 10];
+    let dist1 = mean_point_distance(data10, &embedding1[..D * 10], D);
+    let dist2 = mean_point_distance(data10, &embedding2[..D * 10], D);
+    assert!(
+        (dist1 - dist2).abs() < dist1 * 0.5,
+        "cluster structure changed too much: {} vs {}",
+        dist1,
+        dist2,
+    );
+}
+
+/// Equivalence: a second barnes_hut call reusing cached affinities produces
+/// the same embedding as a plain barnes_hut continuation within tolerance.
+#[test]
+fn affinities_equivalence_first_step() {
+    const N: usize = 100;
+    const CAPTURE: usize = 1; // Compare after 1 epoch.
+
+    let data = lcg_samples(N, D, 99);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    // Build affinities from a reference run.
+    let mut tsne_ref: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_ref
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities = tsne_ref.affinities().unwrap();
+    let seed = tsne_ref.embedding();
+
+    // Path A: plain barnes_hut continuation from the seed.
+    let mut tsne_a: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_a
+        .perplexity(PERPLEXITY)
+        .epochs(CAPTURE + 1)
+        .initial_embedding(seed.clone());
+    tsne_a.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let result_a = tsne_a.embedding();
+
+    // Path B: barnes_hut with cached affinities from the same seed.
+    let mut tsne_b: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_b
+        .perplexity(PERPLEXITY)
+        .epochs(CAPTURE + 1)
+        .initial_embedding(seed)
+        .with_affinities(affinities);
+    tsne_b.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let result_b = tsne_b.embedding();
+
+    // Two runs on the same thread pool may differ by parallel-reduction noise,
+    // so use a tolerance.
+    let max_diff: f32 = result_a
+        .iter()
+        .zip(result_b.iter())
+        .map(|(a, b)| (a - b).abs())
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap();
+    let scale = result_a
+        .iter()
+        .map(|v| v.abs())
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap();
+    assert!(
+        max_diff / scale < 1e-3,
+        "precomputed path diverged from reference: max_diff={max_diff}, scale={scale}",
+    );
+}
+
+/// affinities() returns values summing to about 1 regardless of run length.
+#[test]
+fn affinities_pristine_independent_of_run_length() {
+    const N: usize = 100;
+
+    let data = lcg_samples(N, D, 7);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    // Short run: fewer epochs than stop_lying_epoch (250).
+    let mut tsne_short: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_short
+        .perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities_short = tsne_short.affinities().unwrap();
+    let sum_short: f32 = affinities_short.values.iter().sum();
+
+    // Long run: more epochs than stop_lying_epoch.
+    let mut tsne_long: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_long
+        .perplexity(PERPLEXITY)
+        .epochs(1000)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities_long = tsne_long.affinities().unwrap();
+    let sum_long: f32 = affinities_long.values.iter().sum();
+
+    // Both should sum to approximately 1 (pristine P).
+    assert!(
+        (sum_short - 1.0).abs() < 0.05,
+        "short run affinities sum to {sum_short}, expected ~1",
+    );
+    assert!(
+        (sum_long - 1.0).abs() < 0.05,
+        "long run affinities sum to {sum_long}, expected ~1",
+    );
+    // And they should be identical since the data and perplexity are the same.
+    assert_eq!(
+        affinities_short.rows, affinities_long.rows,
+        "row structure differs between short and long runs",
+    );
+    assert_eq!(
+        affinities_short.columns, affinities_long.columns,
+        "column structure differs between short and long runs",
+    );
+    for (a, b) in affinities_short
+        .values
+        .iter()
+        .zip(affinities_long.values.iter())
+    {
+        assert!((a - b).abs() < 1e-6, "value differs: {} vs {}", a, b,);
+    }
+}
+
+/// Cached affinities are reused in barnes_hut_with_neighbors when custom
+/// neighbors match the cached neighbor indices. When they differ, the
+/// custom neighbors are used and affinities are regenerated.
+#[test]
+fn affinities_work_with_custom_neighbors() {
+    const N: usize = 100;
+
+    let data = lcg_samples(N, D, 42);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    // Build affinities from a reference run.
+    let mut tsne_ref: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_ref
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities = tsne_ref.affinities().unwrap();
+    let seed = tsne_ref.embedding();
+
+    // Build different custom neighbors.
+    let mut rng = rand::rng();
+    let different_neighbors: Vec<Vec<Neighbor<f32>>> = samples
+        .iter()
+        .enumerate()
+        .map(|(sample_idx, _)| {
+            let mut row: Vec<Neighbor<f32>> = (0..N)
+                .filter_map(|i| {
+                    if i == sample_idx {
+                        None
+                    } else {
+                        Some(Neighbor {
+                            index: i,
+                            distance: rng.random_range(0.0..100.0),
+                        })
+                    }
+                })
+                .collect();
+            row.truncate(15);
+            row
+        })
+        .collect();
+
+    // Path B: cached affinities + different custom neighbors.
+    let mut tsne_b: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_b
+        .perplexity(PERPLEXITY)
+        .epochs(50)
+        .initial_embedding(seed.clone())
+        .with_affinities(affinities.clone());
+    tsne_b.barnes_hut_with_neighbors(THETA, &different_neighbors);
+    let result_b = tsne_b.embedding();
+
+    // Path C: cached affinities + barnes_hut (no custom neighbors).
+    let mut tsne_c: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_c
+        .perplexity(PERPLEXITY)
+        .epochs(50)
+        .initial_embedding(seed)
+        .with_affinities(affinities);
+    tsne_c.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let result_c = tsne_c.embedding();
+
+    // When neighbors differ, Path B uses custom neighbors and diverges
+    // from the cached path (Path C).
+    let max_diff: f32 = result_b
+        .iter()
+        .zip(result_c.iter())
+        .map(|(a, b)| (a - b).abs())
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap();
+    let scale = result_b
+        .iter()
+        .map(|v| v.abs())
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap();
+    assert!(
+        max_diff / scale > 0.05,
+        "different neighbors should invalidate cached affinities: max_diff={}, scale={}",
+        max_diff,
+        scale,
+    );
+}
+
+/// Cached affinities path works with random seed when no initial_embedding is set.
+#[test]
+fn cached_affinities_random_seed() {
+    const N: usize = 50;
+
+    let data = lcg_samples(N, D, 7);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    // Build affinities from a reference run.
+    let mut tsne_ref: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_ref
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities = tsne_ref.affinities().unwrap();
+
+    // Cached path with random seed (no initial_embedding).
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .with_affinities(affinities);
+    tsne.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+
+    // Basic sanity: embedding has correct shape and finite values.
+    assert_eq!(embedding.len(), N * 2);
+    assert!(
+        embedding.iter().all(|v| v.is_finite()),
+        "embedding contains non-finite values",
+    );
+    // Values should not all be zero (random init should produce variation).
+    assert!(
+        embedding.iter().any(|v| *v != 0.0),
+        "embedding is all zeros — random init may have failed",
+    );
+}
+
+/// Mismatched dataset size causes cached affinities to be discarded and
+/// rebuilt via the VPTree path.
+#[test]
+fn cached_affinities_discarded_on_dataset_mismatch() {
+    const N_SMALL: usize = 50;
+    const N_LARGE: usize = 100;
+
+    let data_small = lcg_samples(N_SMALL, D, 7);
+    let samples_small: Vec<&[f32]> = data_small.chunks(D).collect();
+
+    // Build affinities from a small dataset.
+    let mut tsne_small: tSNE<f32, &[f32]> = tSNE::new(&samples_small);
+    tsne_small
+        .perplexity(PERPLEXITY)
+        .epochs(EPOCHS)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities = tsne_small.affinities().unwrap();
+
+    // Inject affinities from a different-sized dataset.
+    let data_large = lcg_samples(N_LARGE, D, 7);
+    let samples_large: Vec<&[f32]> = data_large.chunks(D).collect();
+    let mut tsne_large: tSNE<f32, &[f32]> = tSNE::new(&samples_large);
+    tsne_large
+        .perplexity(PERPLEXITY)
+        .with_affinities(affinities);
+
+    // Should not panic — affinities are silently discarded and rebuilt.
+    tsne_large.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne_large.embedding();
+
+    assert_eq!(embedding.len(), N_LARGE * 2);
+    assert!(
+        embedding.iter().all(|v| v.is_finite()),
+        "embedding contains non-finite values",
     );
 }
