@@ -284,13 +284,32 @@ pub(super) fn normalize_p_values<T: Float + Send + Sync + MulAssign + Sum>(
 pub(super) fn symmetrize_sparse_matrix<T>(
     sym_p_rows: &mut Vec<usize>,
     sym_p_columns: &mut Vec<u32>,
-    p_columns: Vec<u32>,
+    mut p_columns: Vec<u32>,
     p_values: &mut Vec<T>,
     n_samples: usize,
     n_neighbors: &usize,
 ) where
     T: Float + Add + DivAssign + Send + Sync + MulAssign,
 {
+    // Sort each neighbor row so we can binary-search instead of scanning linearly.
+    // Apply the same permutation to p_values so (column, value) pairs stay paired.
+    for n in 0..n_samples {
+        let start = n * n_neighbors;
+        let end = start + n_neighbors;
+        if end <= p_columns.len() && end <= p_values.len() {
+            let mut indexed: Vec<(u32, T)> = p_columns[start..end]
+                .iter()
+                .copied()
+                .zip(p_values[start..end].iter().copied())
+                .collect();
+            indexed.sort_by_key(|(col, _)| *col);
+            for (j, (col, val)) in indexed.into_iter().enumerate() {
+                p_columns[start + j] = col;
+                p_values[start + j] = val;
+            }
+        }
+    }
+
     // Neighbor indices are stored as u32 to halve the index memory at large n; `col` reads one as a
     // usize wherever it is used to index into a buffer.
     let col = |i: usize| p_columns[i] as usize;
@@ -306,7 +325,9 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     for n in 0..n_samples {
         for i in p_rows(n)..p_rows(n + 1) {
             row_counts[n] += 1;
-            if !p_columns[p_rows(col(i))..p_rows(col(i) + 1)].contains(&(n as u32)) {
+            // Binary-search whether `n` appears in the neighbor list of `col(i)`.
+            let neighbor_row = &p_columns[p_rows(col(i))..p_rows(col(i) + 1)];
+            if neighbor_row.binary_search(&(n as u32)).is_err() {
                 row_counts[col(i)] += 1;
             }
         }
@@ -327,30 +348,28 @@ pub(super) fn symmetrize_sparse_matrix<T>(
 
     for _n in 0..n_samples {
         for i in p_rows(_n)..p_rows(_n + 1) {
-            // Check whether element (col_P[i], n) is present.
-            let mut present: bool = false;
-            // Considering element(n, col_P[i]).
-            for m in p_rows(col(i))..p_rows(col(i) + 1) {
-                if col(m) == _n {
-                    present = true;
-                    // Make sure we do not add elements twice.
-                    if _n <= col(i) {
-                        sym_col_p[sym_row_p[_n] + offset[_n]] = p_columns[i];
-                        sym_col_p[sym_row_p[col(i)] + offset[col(i)]] = _n as u32;
-                        sym_val_p[sym_row_p[_n] + offset[_n]] = p_values[i] + p_values[m];
-                        sym_val_p[sym_row_p[col(i)] + offset[col(i)]] = p_values[i] + p_values[m];
-                    }
+            // Binary-search whether `_n` appears in the neighbor list of `col(i)`.
+            let neighbor_row = &p_columns[p_rows(col(i))..p_rows(col(i) + 1)];
+            let present = neighbor_row.binary_search(&(_n as u32));
+
+            if let Ok(m_offset) = present {
+                // Make sure we do not add elements twice.
+                if _n <= col(i) {
+                    sym_col_p[sym_row_p[_n] + offset[_n]] = p_columns[i];
+                    sym_col_p[sym_row_p[col(i)] + offset[col(i)]] = _n as u32;
+                    let m = p_rows(col(i)) + m_offset;
+                    sym_val_p[sym_row_p[_n] + offset[_n]] = p_values[i] + p_values[m];
+                    sym_val_p[sym_row_p[col(i)] + offset[col(i)]] = p_values[i] + p_values[m];
                 }
-            }
-            // If (col_P[i], n) is not present, there is no addition involved.
-            if !present {
+            } else {
+                // If (col_P[i], n) is not present, there is no addition involved.
                 sym_col_p[sym_row_p[_n] + offset[_n]] = p_columns[i];
                 sym_col_p[sym_row_p[col(i)] + offset[col(i)]] = _n as u32;
                 sym_val_p[sym_row_p[_n] + offset[_n]] = p_values[i];
                 sym_val_p[sym_row_p[col(i)] + offset[col(i)]] = p_values[i];
             }
             // Update offsets.
-            if !present || _n <= col(i) {
+            if present.is_err() || _n <= col(i) {
                 offset[_n] += 1;
                 if col(i) != _n {
                     offset[col(i)] += 1;
