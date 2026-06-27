@@ -115,6 +115,7 @@ pub struct SparseAffinities<T> {
     rows: Vec<usize>,
     columns: Vec<u32>,
     values: Vec<T>,
+    perplexity: T,
 }
 
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
@@ -782,6 +783,7 @@ where
             rows: self.p_rows.clone(),
             columns: self.p_columns.clone(),
             values,
+            perplexity: self.perplexity,
         })
     }
 
@@ -790,6 +792,10 @@ where
     ///
     /// [`barnes_hut`]: tSNE::barnes_hut
     pub fn with_affinities(&mut self, affinities: SparseAffinities<T>) -> &mut Self {
+        assert!(
+            affinities.perplexity == self.perplexity,
+            "cached affinities were built with a different perplexity"
+        );
         self.p_rows = affinities.rows;
         self.p_columns = affinities.columns;
         self.p_values = affinities.values;
