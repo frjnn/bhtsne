@@ -1114,7 +1114,7 @@ where
         }
         let p_rows = &self.p_rows;
         let p_columns = &self.p_columns;
-        neighbors.par_iter().enumerate().all(|(i, row)| {
+        neighbors.iter().enumerate().all(|(i, row)| {
             let start = p_rows[i];
             let end = p_rows[i + 1];
             (end - start) == row.len()
