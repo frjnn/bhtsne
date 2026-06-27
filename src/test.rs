@@ -1683,3 +1683,22 @@ fn cached_affinities_reset_stop_lying_flag() {
         "second cached-affinities run produced different embedding: stop_lying_fired was not reset",
     );
 }
+
+#[test]
+fn with_affinities_adopts_perplexity_from_affinities() {
+    let data: Vec<f32> = (0..800).map(|i| i as f32).collect();
+    let samples: Vec<&[f32]> = data.chunks(4).collect();
+
+    // Build affinities at perplexity 30.
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(30.0).epochs(20);
+    tsne.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let affinities = tsne.affinities().unwrap();
+
+    // Inject into an instance with a different perplexity.
+    // with_affinities should adopt the perplexity from the affinities.
+    let mut tsne2: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne2.perplexity(5.0);
+    tsne2.with_affinities(affinities);
+    assert_eq!(tsne2.perplexity, 30.0);
+}
