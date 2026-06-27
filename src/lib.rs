@@ -672,7 +672,7 @@ where
         if self.has_cached_affinities(n_samples) {
             return self.run_cached_affinities(theta, n_samples);
         }
-        // No cached affinities or mismatched dataset — rebuild.
+        // No cached affinities or mismatched dataset, rebuild.
         let data = self.data;
         // Number of points to consider when approximating the conditional distribution P.
         let n_neighbors: usize = (T::from(3.0).unwrap() * self.perplexity).as_();

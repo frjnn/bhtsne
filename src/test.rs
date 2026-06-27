@@ -1503,7 +1503,7 @@ fn cached_affinities_random_seed() {
     // Values should not all be zero (random init should produce variation).
     assert!(
         embedding.iter().any(|v| *v != 0.0),
-        "embedding is all zeros — random init may have failed",
+        "embedding is all zeros, random init may have failed",
     );
 }
 
@@ -1533,7 +1533,7 @@ fn cached_affinities_discarded_on_dataset_mismatch() {
         .perplexity(PERPLEXITY)
         .with_affinities(affinities);
 
-    // Should not panic — affinities are silently discarded and rebuilt.
+    // Should not panic, affinities are silently discarded and rebuilt.
     tsne_large.barnes_hut(THETA, |a, b| euclidean(a, b));
     let embedding = tsne_large.embedding();
 
