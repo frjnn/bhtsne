@@ -56,7 +56,7 @@ criterion = { version = "0.8", default-features = false, features = [
 ] }
 csv = "1.3"
 num-traits = "0.2"
-plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "point_series", "ttf"] }
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "point_series"] }
 npyz = { version = "0.9", features = ["npz"] }
 chrono = "0.4"
 
