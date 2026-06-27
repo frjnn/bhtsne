@@ -145,6 +145,7 @@ where
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
     stop_lying_fired: bool,
+    cached_perplexity: Option<T>,
     fit: Option<Fit<T>>,
 }
 
@@ -233,6 +234,7 @@ where
             epoch_callback: None,
             initial_embedding: None,
             stop_lying_fired: false,
+            cached_perplexity: None,
             fit: None,
         }
     }
@@ -791,6 +793,7 @@ where
         self.p_rows = affinities.rows;
         self.p_columns = affinities.columns;
         self.p_values = affinities.values;
+        self.cached_perplexity = Some(self.perplexity);
         self
     }
     /// writes sample `index`'s neighbor indices and distances; the rest is common.
@@ -856,6 +859,9 @@ where
             n_samples,
             &n_neighbors,
         );
+
+        // Record the perplexity used so a later change invalidates the cache.
+        self.cached_perplexity = Some(self.perplexity);
 
         // Normalize P, seed the embedding, then run the optimization loop.
         self.barnes_hut_optimize(theta, grad_entries)
@@ -1091,14 +1097,19 @@ where
 
     /// Returns true if cached affinities match the current dataset.
     fn has_cached_affinities(&self, n_samples: usize) -> bool {
-        !self.p_rows.is_empty() && self.p_rows.len() == n_samples + 1
+        !self.p_rows.is_empty()
+            && self.p_rows.len() == n_samples + 1
+            && self.cached_perplexity == Some(self.perplexity)
     }
 
     /// Returns true if cached affinities encode the same neighbor indices as
     /// the provided neighbors slice. Returns false if affinities are absent
     /// or neighbors differ.
     fn cached_affinities_match_neighbors(&self, neighbors: &[Vec<Neighbor<T>>]) -> bool {
-        if self.p_rows.is_empty() || self.p_rows.len() != neighbors.len() + 1 {
+        if self.p_rows.is_empty()
+            || self.p_rows.len() != neighbors.len() + 1
+            || self.cached_perplexity != Some(self.perplexity)
+        {
             return false;
         }
         let p_rows = &self.p_rows;

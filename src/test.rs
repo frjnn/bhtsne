@@ -1543,3 +1543,75 @@ fn cached_affinities_discarded_on_dataset_mismatch() {
         "embedding contains non-finite values",
     );
 }
+/// Changing perplexity after a fit must invalidate the cached affinities:
+/// the second run recomputes P with the new perplexity rather than reusing
+/// stale values. Both paths run in a single-thread pool so the Barnes-Hut
+/// reductions are deterministic and the embeddings are bit-comparable.
+#[test]
+fn cached_affinities_invalidated_on_perplexity_change() {
+    const N: usize = 80;
+
+    let data = lcg_samples(N, D, 42);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    let new_perplexity = 2.0_f32;
+    let n_neighbors = (3.0 * new_perplexity) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+
+    // Seed from a preliminary run.
+    let mut tsne_seed: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_seed.perplexity(PERPLEXITY).epochs(20);
+    tsne_seed.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let seed = tsne_seed.embedding();
+
+    // Build reference affinities with new_perplexity.
+    let mut tsne_ref: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne_ref.perplexity(new_perplexity);
+    tsne_ref.barnes_hut_with_neighbors(THETA, &neighbors);
+    let affinities = tsne_ref.affinities().unwrap();
+
+    // Single-thread pool for deterministic Barnes-Hut reductions.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let (result_a, result_b) = pool.install(|| {
+        // Path A: inject affinities, change perplexity, run.
+        // The cache should be invalidated because perplexity changed.
+        let mut tsne_a: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne_a
+            .perplexity(new_perplexity)
+            .with_affinities(affinities.clone())
+            .epochs(50)
+            .initial_embedding(seed.clone());
+        // Change perplexity AFTER caching.
+        tsne_a.perplexity(PERPLEXITY);
+        tsne_a.barnes_hut_with_neighbors(THETA, &neighbors);
+        let result_a = tsne_a.embedding();
+
+        // Path B: inject affinities, same perplexity, run.
+        // Cache should be reused.
+        let mut tsne_b: tSNE<f32, &[f32]> = tSNE::new(&samples);
+        tsne_b
+            .perplexity(new_perplexity)
+            .with_affinities(affinities)
+            .epochs(50)
+            .initial_embedding(seed);
+        tsne_b.barnes_hut_with_neighbors(THETA, &neighbors);
+        let result_b = tsne_b.embedding();
+
+        (result_a, result_b)
+    });
+
+    // Path A recomputes P (cache invalidated by perplexity change),
+    // Path B reuses cached P. Different P distributions produce
+    // different embeddings, so they must NOT match.
+    let any_diff = result_a
+        .iter()
+        .zip(result_b.iter())
+        .any(|(a, b)| (a - b).abs() > 1e-6);
+    assert!(
+        any_diff,
+        "embeddings are identical: perplexity change did not invalidate cache",
+    );
+}
