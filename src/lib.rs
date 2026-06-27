@@ -107,6 +107,16 @@ pub struct Neighbor<T> {
     pub index: usize,
     pub distance: T,
 }
+/// A precomputed sparse, symmetric affinity graph in the CSR-like layout
+/// `barnes_hut` uses internally. Obtain via [`tSNE::affinities`] and inject
+/// with [`tSNE::with_affinities`].
+#[derive(Clone)]
+pub struct SparseAffinities<T> {
+    rows: Vec<usize>,
+    columns: Vec<u32>,
+    values: Vec<T>,
+    perplexity: T,
+}
 
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
@@ -135,6 +145,8 @@ where
     gains: Vec<T>,
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
+    stop_lying_fired: bool,
+    cached_perplexity: Option<T>,
     fit: Option<Fit<T>>,
 }
 
@@ -222,6 +234,8 @@ where
             gains: Vec::new(),
             epoch_callback: None,
             initial_embedding: None,
+            stop_lying_fired: false,
+            cached_perplexity: None,
             fit: None,
         }
     }
@@ -654,13 +668,17 @@ where
         F: Fn(&U, &U) -> T + Send + Sync,
         Dim<D>: Morton<D>,
     {
-        // Validate before building the tree so misuse does not pay for it first.
+        // Validate before doing any work.
         self.validate_fit_params(theta);
 
+        let n_samples = self.data.len();
+        if self.has_cached_affinities(n_samples) {
+            return self.run_cached_affinities(theta, n_samples);
+        }
+        // No cached affinities or mismatched dataset, rebuild.
         let data = self.data;
         // Number of points to consider when approximating the conditional distribution P.
         let n_neighbors: usize = (T::from(3.0).unwrap() * self.perplexity).as_();
-
         // Build ball tree on the data set.
         let tree = tsne::vptree::VPTree::new(data, &metric_f);
 
@@ -719,8 +737,13 @@ where
             "error: every neighbors row must have the same length, greater than zero."
         );
 
-        // These indices later index P rows in symmetrize_sparse_matrix; reject
-        // out-of-range here instead of panicking cryptically there.
+        // If cached affinities encode the same neighbors, reuse them.
+        // Indices are provably valid from the run that produced the cache.
+        if self.cached_affinities_match_neighbors(neighbors) {
+            return self.run_cached_affinities(theta, n_samples);
+        }
+
+        // Cache miss: indices will be used, validate them.
         assert!(
             neighbors
                 .iter()
@@ -741,7 +764,41 @@ where
         })
     }
 
-    /// Shared Barnes-Hut fit. `fill_neighbors(index, p_columns_row, distances_row)`
+    /// Returns the affinity graph from the last `barnes_hut` fit in pristine
+    /// (pre-exaggeration) form, or `None` if no Barnes-Hut fit has run.
+    /// Its values sum to approximately 1.
+    ///
+    pub fn affinities(&self) -> Option<SparseAffinities<T>> {
+        if self.p_rows.is_empty() {
+            return None;
+        }
+        // Undo exaggeration unless stop_lying has already undone it.
+        let values = if self.stop_lying_fired {
+            self.p_values.clone()
+        } else {
+            let scale = T::one() / self.early_exaggeration;
+            self.p_values.iter().map(|v| *v * scale).collect()
+        };
+        Some(SparseAffinities {
+            rows: self.p_rows.clone(),
+            columns: self.p_columns.clone(),
+            values,
+            perplexity: self.perplexity,
+        })
+    }
+
+    /// Injects a previously extracted affinity graph. The next `barnes_hut`
+    /// call will reuse it and skip the neighbor search.
+    ///
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    pub fn with_affinities(&mut self, affinities: SparseAffinities<T>) -> &mut Self {
+        self.perplexity = affinities.perplexity;
+        self.p_rows = affinities.rows;
+        self.p_columns = affinities.columns;
+        self.p_values = affinities.values;
+        self.cached_perplexity = Some(self.perplexity);
+        self
+    }
     /// writes sample `index`'s neighbor indices and distances; the rest is common.
     fn barnes_hut_fit<F>(&mut self, theta: T, n_neighbors: usize, fill_neighbors: F) -> &mut Self
     where
@@ -806,15 +863,38 @@ where
             &n_neighbors,
         );
 
+        // Record the perplexity used so a later change invalidates the cache.
+        self.cached_perplexity = Some(self.perplexity);
+
+        // Normalize P, seed the embedding, then run the optimization loop.
+        self.barnes_hut_optimize(theta, grad_entries)
+    }
+
+    /// Runs the Barnes-Hut optimization loop. Normalizes P (applying
+    /// exaggeration), seeds the embedding, then runs the epoch loop.
+    fn barnes_hut_optimize(&mut self, theta: T, grad_entries: usize) -> &mut Self
+    where
+        Dim<D>: Morton<D>,
+    {
         // Normalize P, disable the early exaggeration if requested, and seed the embedding.
         self.finalize_p_and_seed(grad_entries);
 
+        self.barnes_hut_run_loop(theta, grad_entries)
+    }
+
+    /// Runs the Barnes-Hut epoch loop. Called after setup (normalization,
+    /// seeding) is complete. The caller must have `self.p_rows` /
+    /// `self.p_columns` / `self.p_values` populated.
+    fn barnes_hut_run_loop(&mut self, theta: T, grad_entries: usize) -> &mut Self
+    where
+        Dim<D>: Morton<D>,
+    {
         // Prepares buffers for Barnes-Hut algorithm.
         let mut positive_forces: Vec<T> = vec![T::zero(); grad_entries];
         let mut negative_forces: Vec<T> = vec![T::zero(); grad_entries];
 
         // Per-sample contribution to the Q normalization term, reduced after the force pass.
-        let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
+        let mut q_sums: Vec<T> = vec![T::zero(); self.data.len()];
 
         // Per-dimension means for the zero-mean recentering, reused across epochs.
         let mut means: Vec<T> = vec![T::zero(); D];
@@ -823,6 +903,7 @@ where
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
         // The theta acceptance test uses the squared form, so precompute theta squared once.
+        let n_samples = self.data.len();
         let theta_sq = theta * theta;
 
         // Main Training loop.
@@ -996,6 +1077,7 @@ where
     ) {
         if epoch == self.stop_lying_epoch && epoch != 0 {
             tsne::stop_lying(&mut self.p_values, self.early_exaggeration);
+            self.stop_lying_fired = true;
         }
         if epoch == self.momentum_switch_epoch {
             self.momentum = self.final_momentum;
@@ -1014,6 +1096,50 @@ where
             A value of 0.0 corresponds to using the exact version of the algorithm."
         );
         tsne::check_perplexity(&self.perplexity, &self.data.len());
+    }
+
+    /// Returns true if cached affinities match the current dataset.
+    fn has_cached_affinities(&self, n_samples: usize) -> bool {
+        !self.p_rows.is_empty()
+            && self.p_rows.len() == n_samples + 1
+            && self.cached_perplexity == Some(self.perplexity)
+    }
+
+    /// Returns true if cached affinities encode the same neighbor indices as
+    /// the provided neighbors slice. Returns false if affinities are absent
+    /// or neighbors differ.
+    fn cached_affinities_match_neighbors(&self, neighbors: &[Vec<Neighbor<T>>]) -> bool {
+        if self.p_rows.is_empty()
+            || self.p_rows.len() != neighbors.len() + 1
+            || self.cached_perplexity != Some(self.perplexity)
+        {
+            return false;
+        }
+        let p_rows = &self.p_rows;
+        let p_columns = &self.p_columns;
+        neighbors.iter().enumerate().all(|(i, row)| {
+            let start = p_rows[i];
+            let end = p_rows[i + 1];
+            (end - start) == row.len()
+                && row
+                    .iter()
+                    .enumerate()
+                    .all(|(j, neighbor)| p_columns[start + j] == neighbor.index as u32)
+        })
+    }
+
+    /// Runs the cached-affinities optimization path.
+    fn run_cached_affinities(&mut self, theta: T, n_samples: usize) -> &mut Self
+    where
+        Dim<D>: Morton<D>,
+    {
+        self.stop_lying_fired = false;
+        let grad_entries = n_samples * D;
+        self.y.resize(grad_entries, T::zero());
+        self.uy.resize(grad_entries, T::zero());
+        self.gains.resize(grad_entries, T::one());
+        self.finalize_p_and_seed(grad_entries);
+        self.barnes_hut_run_loop(theta, grad_entries)
     }
 
     /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
