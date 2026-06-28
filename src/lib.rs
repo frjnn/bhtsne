@@ -547,7 +547,7 @@ where
             self.q_values
                 .par_iter_mut()
                 .zip(distances.par_iter())
-                .for_each(|(q, d)| *q = T::one() / (T::one() + *d));
+                .for_each(|(q, d)| *q = (T::one() + *d).recip());
 
             // Computes the exact gradient in parallel.
             let q_values_sum: T = self.q_values.par_iter().copied().sum::<T>();
@@ -776,7 +776,7 @@ where
         let values = if self.stop_lying_fired {
             self.p_values.clone()
         } else {
-            let scale = T::one() / self.early_exaggeration;
+            let scale = self.early_exaggeration.recip();
             self.p_values.iter().map(|v| *v * scale).collect()
         };
         Some(SparseAffinities {
@@ -906,10 +906,14 @@ where
         let n_samples = self.data.len();
         let theta_sq = theta * theta;
 
+        // One arena, rebuilt in place each epoch so it reuses its buffers instead of
+        // reallocating every epoch.
+        let mut arena = tsne::arena::Arena::<T, D>::empty();
+
         // Main Training loop.
         for epoch in 0..self.epochs {
-            // Construct the Morton arena over the current embedding.
-            let arena = tsne::arena::Arena::<T, D>::new(&self.y, n_samples);
+            // Rebuild the Morton arena over the current embedding.
+            arena.rebuild(&self.y, n_samples);
             debug_assert!(
                 arena.centers_of_mass_within_cells(),
                 "error: arena centre of mass escaped its cell."
@@ -965,7 +969,7 @@ where
             // Sequential q_sum: barrier-free and negligible against the forces. The reciprocal is
             // precomputed so the fused update multiplies instead of dividing per value.
             let q_sum: T = q_sums.iter().copied().sum();
-            let inverse_q_sum = T::one() / q_sum;
+            let inverse_q_sum = q_sum.recip();
 
             // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
             // update, so it needs no separate buffer or sweep.

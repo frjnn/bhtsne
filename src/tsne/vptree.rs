@@ -4,22 +4,33 @@ use rand::Rng;
 
 use num_traits::Float;
 
-/// A node of the vantage point tree.
+/// `left`/`right` value marking the absence of a child.
+const SENTINEL: u32 = u32::MAX;
+
+/// One node of the flat vantage point tree. Node `0` is the root.
 #[derive(Clone, Debug)]
-pub(crate) struct Node<T: Float> {
-    index: usize,
+struct Node<T: Float> {
+    item: u32,
     threshold: T,
-    left: Option<Box<Node<T>>>,
-    right: Option<Box<Node<T>>>,
+    left: u32,
+    right: u32,
+}
+
+/// Which side of its parent a frame's node hangs off, so the build can wire the link once the
+/// node's arena index is known.
+enum Side {
+    Root,
+    Left,
+    Right,
 }
 
 impl<T: Float> Default for Node<T> {
     fn default() -> Self {
         Node {
-            index: 0,
+            item: 0,
             threshold: T::zero(),
-            left: None,
-            right: None,
+            left: SENTINEL,
+            right: SENTINEL,
         }
     }
 }
@@ -53,32 +64,10 @@ impl<T: Float> Ord for HeapItem<T> {
     }
 }
 
-/// Auxiliary struct used to build the vantage point tree.
-struct VPTreeBuilder<'a, T: Float> {
-    root: &'a mut Option<Box<Node<T>>>,
-    lower: usize,
-    upper: usize,
-}
-
-impl<'a, T: Float> VPTreeBuilder<'a, T> {
-    /// VPTreeBuilder constructor.
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - current node.
-    ///
-    /// * `lower` - lower bound.
-    ///
-    /// * `upper` - upper bound.
-    fn new(root: &'a mut Option<Box<Node<T>>>, lower: usize, upper: usize) -> Self {
-        Self { root, lower, upper }
-    }
-}
-
 /// Vantage Point tree.
 pub(crate) struct VPTree<'a, T: Float + Send + Sync, U> {
     items: Vec<(usize, &'a U)>,
-    pub(crate) root: Option<Box<Node<T>>>,
+    nodes: Vec<Node<T>>,
 }
 
 impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
@@ -97,72 +86,90 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
             // Need to swap some references around, don't want to move original data.
             // Also need to keep track of the original position, as it will differ.
             items: items.iter().enumerate().collect(),
-            root: None,
+            nodes: Vec::new(),
         };
-        let n_samples = tree.items.len(); // Immutable borrow must be kept outside.
-        tree.build_from_points(0, n_samples, &metric_f);
+        tree.build(&metric_f);
 
         tree
     }
 
-    /// Function that iteratively fills the tree.
+    /// Builds the flat tree over `items`. Iterative, with an explicit frame stack standing in for
+    /// recursion: each frame is a half-open `items` range and the parent slot its node fills.
     ///
     /// # Arguments
     ///
-    /// * `lower' - lower bound.
-    ///
-    /// * `upper` - upper bound.
-    ///
     /// * `metric_f` - metric function.
-    fn build_from_points<F>(&mut self, lower: usize, upper: usize, metric_f: F)
+    fn build<F>(&mut self, metric_f: F)
     where
         F: Fn(&U, &U) -> T,
     {
-        let mut stack = vec![VPTreeBuilder::new(&mut self.root, lower, upper)];
-        let mut thread_rng = super::make_rng();
+        let n = self.items.len();
+        if n == 0 {
+            return;
+        }
 
-        while let Some(builder) = stack.pop() {
-            let VPTreeBuilder { root, lower, upper } = builder;
+        let mut rng = super::make_rng();
+        // Cached (distance, item) pairs for the current partition, reused across frames.
+        let mut partition: Vec<(T, (usize, &'a U))> = Vec::new();
+        let mut stack = vec![(0usize, n, SENTINEL, Side::Root)];
 
-            // Lower index is center of current node.
-            if upper != lower {
-                *root = Some(Box::new(Node::default()));
-                let node = root.as_deref_mut().unwrap();
-                node.index = lower;
+        while let Some((lower, upper, parent, side)) = stack.pop() {
+            // An empty range contributes no node; the parent's link stays SENTINEL.
+            if lower == upper {
+                continue;
+            }
 
-                if upper - lower > 1 {
-                    // If we did not arrive at leaf yet choose an arbitrary point
-                    // and move it to the start.
-                    let i = thread_rng.random_range(lower..upper);
-                    self.items.swap(lower, i);
+            // Allocate this node and wire it to its parent.
+            let node_index = self.nodes.len() as u32;
+            self.nodes.push(Node {
+                item: lower as u32,
+                ..Node::default()
+            });
+            match side {
+                Side::Root => {}
+                Side::Left => self.nodes[parent as usize].left = node_index,
+                Side::Right => self.nodes[parent as usize].right = node_index,
+            }
 
-                    let (_, to_cmp) = self.items[lower];
-                    // Partition around the median distances.
-                    let median: usize = (upper + lower) / 2;
-                    self.items[lower + 1..upper].select_nth_unstable_by(
-                        median - lower - 1,
-                        &mut |(_, a): &(usize, &U), (_, b): &(usize, &U)| {
-                            if metric_f(to_cmp, a) < metric_f(to_cmp, b) {
-                                Ordering::Less
-                            } else if metric_f(to_cmp, a) == metric_f(to_cmp, b) {
-                                Ordering::Equal
-                            } else {
-                                Ordering::Greater
-                            }
-                        },
-                    );
+            if upper - lower > 1 {
+                // Choose an arbitrary vantage point and move it to the start.
+                let i = rng.random_range(lower..upper);
+                self.items.swap(lower, i);
 
-                    // Threshold of the new node will be the distances to the median.
-                    node.threshold = metric_f(self.items[lower].1, self.items[median].1);
+                let vantage = self.items[lower].1;
+                let median = (upper + lower) / 2;
 
-                    stack.push(VPTreeBuilder::new(&mut node.left, lower + 1, median));
-                    stack.push(VPTreeBuilder::new(&mut node.right, median, upper));
+                // Cache the vantage-to-candidate distances once, then select the median on the
+                // cached scalars.
+                partition.clear();
+                partition.extend(
+                    self.items[lower + 1..upper]
+                        .iter()
+                        .map(|pair @ (_, sample)| (metric_f(vantage, sample), *pair)),
+                );
+                let k = median - lower - 1;
+                partition.select_nth_unstable_by(k, |(a, ..), (b, ..)| {
+                    a.partial_cmp(b).unwrap_or(Ordering::Equal)
+                });
+                // Write the partitioned order back into `items`.
+                for (slot, &(_, pair)) in self.items[lower + 1..upper]
+                    .iter_mut()
+                    .zip(partition.iter())
+                {
+                    *slot = pair;
                 }
+
+                // Threshold of the new node is the distance to the median.
+                self.nodes[node_index as usize].threshold = metric_f(vantage, self.items[median].1);
+
+                stack.push((lower + 1, median, node_index, Side::Left));
+                stack.push((median, upper, node_index, Side::Right));
             }
         }
     }
 
-    /// Auxiliary function that searches for the k nearest neighbors of an item.
+    /// Auxiliary function that searches for the k nearest neighbors of an item, accumulating them on
+    /// `heap`.
     fn look_up<F>(
         &self,
         tau: &mut T, // Tracks the distances to the farthest point in the results.
@@ -173,56 +180,55 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     ) where
         F: Fn(&U, &U) -> T,
     {
-        let mut stack: Vec<&Option<Box<Node<T>>>> = vec![&self.root];
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut stack: Vec<u32> = vec![0];
 
-        while let Some(next_in_stack) = stack.pop() {
-            if let Some(node) = next_in_stack {
-                let (original_position, point) = &self.items[node.index];
-                // Compute distances between target and current node.
-                let distance: T = metric_f(point, target);
-                if distance < *tau {
-                    // If current node is within the radius tau
-                    // remove furthest node from result list (if it already contains k results),
-                    // add current node to result list and
-                    // update value of tau (farthest point in result list).
-                    if heap.len() == k {
-                        heap.pop();
-                    }
-                    heap.push(HeapItem {
-                        index: *original_position,
-                        distance,
-                    });
-                    if heap.len() == k {
-                        *tau = heap.peek().unwrap().distance;
-                    }
+        while let Some(node_index) = stack.pop() {
+            let node = &self.nodes[node_index as usize];
+            let (original_position, point) = self.items[node.item as usize];
+            // Compute distances between target and current node.
+            let distance: T = metric_f(point, target);
+            if distance < *tau {
+                // If current node is within the radius tau
+                // remove furthest node from result list (if it already contains k results),
+                // add current node to result list and
+                // update value of tau (farthest point in result list).
+                if heap.len() == k {
+                    heap.pop();
                 }
+                heap.push(HeapItem {
+                    index: original_position,
+                    distance,
+                });
+                if heap.len() == k {
+                    *tau = heap.peek().unwrap().distance;
+                }
+            }
 
-                match (node.left.as_ref(), node.right.as_ref()) {
-                    // Return if we arrived at a leaf.
-                    (None, None) => continue,
-                    (_, _) => {
-                        // If the target lies within the radius of ball.
-                        if distance < node.threshold {
-                            // if there can still be neighbors inside the ball, recursively search left child first.
-                            if distance - *tau <= node.threshold {
-                                stack.push(&node.left)
-                            }
-                            // if there can still be neighbors outside the ball, recursively search right child.
-                            if distance + *tau >= node.threshold {
-                                stack.push(&node.right)
-                            }
-                        } else {
-                            // If the target lies outsize the radius of the ball.
-                            // If there can still be neighbors outside the ball, recursively search right child.
-                            if distance + *tau >= node.threshold {
-                                stack.push(&node.right)
-                            }
-                            // if there can still be neighbors inside the ball, recursively search left child.
-                            if distance - *tau <= node.threshold {
-                                stack.push(&node.left)
-                            }
-                        }
-                    }
+            // Return if we arrived at a leaf.
+            if node.left == SENTINEL && node.right == SENTINEL {
+                continue;
+            }
+
+            if distance < node.threshold {
+                // If the target lies within the radius of the ball, search the left (near) child
+                // first; the right (far) child only if neighbors could still lie outside the ball.
+                if distance + *tau >= node.threshold && node.right != SENTINEL {
+                    stack.push(node.right);
+                }
+                if distance - *tau <= node.threshold && node.left != SENTINEL {
+                    stack.push(node.left);
+                }
+            } else {
+                // If the target lies outside the radius of the ball, search the right (far) child
+                // first; the left (near) child only if neighbors could still lie inside the ball.
+                if distance - *tau <= node.threshold && node.left != SENTINEL {
+                    stack.push(node.left);
+                }
+                if distance + *tau >= node.threshold && node.right != SENTINEL {
+                    stack.push(node.right);
                 }
             }
         }
@@ -234,11 +240,11 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     ///
     /// * `target` -  target data point.
     ///
-    /// * `index` - index of the target.
+    /// * `target_index` - index of the target.
     ///
     /// * `k` - number of nearest neighbors.
     ///
-    /// * `results` - vector in which the index of the nearest neighbors will be saved.
+    /// * `neighbors_indices` - vector in which the index of the nearest neighbors will be saved.
     ///
     /// * `distances` - vector storing relative distances of the nearest neighbors.
     ///

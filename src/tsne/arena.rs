@@ -48,6 +48,11 @@ struct Node<T, const D: usize> {
 /// A Morton linear quadtree (`D == 2`) or octree (`D == 3`) over the embedding, in one arena.
 pub(crate) struct Arena<T, const D: usize> {
     nodes: Vec<Node<T, D>>,
+    /// Build scratch: each emitted node's half-open window in `sorted`. Retained with `nodes` so a
+    /// rebuild reuses the allocation rather than reallocating it every epoch.
+    ranges: Vec<(u32, u32)>,
+    /// The `(Morton code, point index)` permutation, retained across rebuilds to reuse its allocation.
+    sorted: Vec<(u64, u32)>,
     /// Squared maximum half-width of a cell at each level, indexed by `Node::level`. The theta
     /// acceptance test compares this against `theta^2 * dist`, the squared form of the reference
     /// `max_half_width / sqrt(dist) < theta`, avoiding a square root per visit.
@@ -91,7 +96,21 @@ impl<T, const D: usize> Arena<T, D>
 where
     T: Float + Send + Sync + AddAssign,
 {
-    /// Builds the arena over `y`, a flat buffer of `n_samples` points of `D` components each.
+    /// Creates an empty arena. The epoch loop holds one of these and rebuilds it each epoch so the
+    /// buffers persist and are reused.
+    pub(crate) fn empty() -> Self {
+        Self {
+            nodes: Vec::new(),
+            ranges: Vec::new(),
+            sorted: Vec::new(),
+            level_half_width_sq: Vec::new(),
+            coms_within_cells: true,
+        }
+    }
+
+    /// Builds a fresh arena over `y`, a flat buffer of `n_samples` points of `D` components each.
+    /// Convenience for one-shot callers and tests; the epoch loop instead holds one arena and calls
+    /// [`Arena::rebuild`] so the buffers persist and are reused.
     ///
     /// # Panics
     ///
@@ -101,14 +120,32 @@ where
     where
         Dim<D>: Morton<D>,
     {
+        let mut arena = Self::empty();
+        arena.rebuild(y, n_samples);
+        arena
+    }
+
+    /// Rebuilds the arena over `y`, a flat buffer of `n_samples` points of `D` components each, in
+    /// place, reusing the retained buffers rather than reallocating them each epoch.
+    ///
+    /// # Panics
+    ///
+    /// If the leaf masses do not sum to `n_samples` (point conservation), which a correct Morton
+    /// build always satisfies.
+    pub(crate) fn rebuild(&mut self, y: &[T], n_samples: usize)
+    where
+        Dim<D>: Morton<D>,
+    {
         let bits = <Dim<D> as Morton<D>>::BITS;
 
+        self.nodes.clear();
+        self.ranges.clear();
+        self.sorted.clear();
+        self.coms_within_cells = true;
+
         if n_samples == 0 {
-            return Self {
-                nodes: Vec::new(),
-                level_half_width_sq: Vec::new(),
-                coms_within_cells: true,
-            };
+            self.level_half_width_sq.clear();
+            return;
         }
 
         // 1. Bounding box and the derived quantization scale.
@@ -131,165 +168,169 @@ where
         // The squared half-width per level for the theta test: cell full width per axis at level L
         // is extent / 2^L, so the maximum half-width is max(extent) / 2^(L+1).
         let max_extent = extent.iter().copied().fold(T::zero(), T::max);
-        let mut level_half_width_sq = Vec::with_capacity(bits as usize + 1);
+        self.level_half_width_sq.clear();
         for level in 0..=bits {
             let half_width = max_extent / T::from(1u64 << (level + 1)).unwrap();
-            level_half_width_sq.push(half_width * half_width);
+            self.level_half_width_sq.push(half_width * half_width);
         }
 
-        // 2-4. Quantize, encode, and sort a (code, index) permutation into Z-order.
-        let mut sorted: Vec<(u64, u32)> = (0..n_samples)
-            .into_par_iter()
-            .with_min_len(PARALLEL_CODE_THRESHOLD)
-            .map(|i| {
-                let point = &y[i * D..i * D + D];
-                let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
-                    point, &min, &inv_scale, max_bucket,
-                ));
-                (code, i as u32)
-            })
-            .collect();
-        sorted.par_sort_unstable_by_key(|&(code, _)| code);
+        // 2-4. Quantize, encode, and sort a (code, index) permutation into Z-order. `sorted` is
+        // refilled from the cleared buffer, reusing its capacity across epochs.
+        self.sorted.par_extend(
+            (0..n_samples)
+                .into_par_iter()
+                .with_min_len(PARALLEL_CODE_THRESHOLD)
+                .map(|i| {
+                    let point = &y[i * D..i * D + D];
+                    let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
+                        point, &min, &inv_scale, max_bucket,
+                    ));
+                    (code, i as u32)
+                }),
+        );
+        self.sorted.par_sort_unstable_by_key(|&(code, _)| code);
 
-        // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
-        // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
-        // node's window in `sorted` and is build scratch only. Every internal node has at least two
-        // children (single-child chains are skipped by the tightest-enclosing-level jump), so an
-        // arena over `n` points holds at most `2n - 1` nodes; reserving that up front lets the
-        // sequential emission push without reallocating as it grows, every epoch.
-        let mut nodes: Vec<Node<T, D>> = Vec::with_capacity(2 * n_samples - 1);
-        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(2 * n_samples - 1);
-        nodes.push(Node {
-            center_of_mass: [T::zero(); D],
-            count: n_samples as u32,
-            first_child: SENTINEL,
-            child_count: 0,
-            level: bits as u8,
-        });
-        ranges.push((0, n_samples as u32));
+        let coms_within_cells = {
+            let sorted = &self.sorted;
+            let nodes = &mut self.nodes;
+            let ranges = &mut self.ranges;
 
-        let mask = (1u64 << D) - 1;
-        let mut node = 0usize;
-        while node < nodes.len() {
-            let (start, end) = ranges[node];
-            // A single point, or a cell of points that share a full code (closer than one grid
-            // cell, the duplicate case), is a leaf. Sorted codes make the all-equal test O(1).
-            if end - start <= 1 || sorted[start as usize].0 == sorted[(end - 1) as usize].0 {
-                node += 1;
-                continue;
-            }
+            // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
+            // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
+            // node's window in `sorted`. Every internal node has at least two children (single-child
+            // chains are skipped by the tightest-enclosing-level jump), so an arena over `n` points
+            // holds at most `2n - 1` nodes; reserving that up front lets the sequential emission push
+            // without reallocating (a no-op once the buffers have grown on the first epoch).
+            nodes.reserve(2 * n_samples - 1);
+            ranges.reserve(2 * n_samples - 1);
+            nodes.push(Node {
+                center_of_mass: [T::zero(); D],
+                count: n_samples as u32,
+                first_child: SENTINEL,
+                child_count: 0,
+                level: bits as u8,
+            });
+            ranges.push((0, n_samples as u32));
 
-            // Tightest enclosing level: the highest bit at which the range's extreme codes differ
-            // sits in the D-bit group that first splits the range, so the node skips straight to
-            // that level rather than emitting single-child chains.
-            let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
-            let highest_diff = 63 - xor.leading_zeros();
-            let level = (bits - 1) - highest_diff / D as u32;
-            let shift = D as u32 * (bits - 1 - level);
-            nodes[node].level = level as u8;
-
-            let first_child = nodes.len() as u32;
-            let mut child_count: u8 = 0;
-            let mut child_start = start;
-            while child_start < end {
-                let group = (sorted[child_start as usize].0 >> shift) & mask;
-                let mut child_end = child_start + 1;
-                while child_end < end && (sorted[child_end as usize].0 >> shift) & mask == group {
-                    child_end += 1;
+            let mask = (1u64 << D) - 1;
+            let mut node = 0usize;
+            while node < nodes.len() {
+                let (start, end) = ranges[node];
+                // A single point, or a cell of points that share a full code (closer than one grid
+                // cell, the duplicate case), is a leaf. Sorted codes make the all-equal test O(1).
+                if end - start <= 1 || sorted[start as usize].0 == sorted[(end - 1) as usize].0 {
+                    node += 1;
+                    continue;
                 }
-                nodes.push(Node {
-                    center_of_mass: [T::zero(); D],
-                    count: (child_end - child_start),
-                    first_child: SENTINEL,
-                    child_count: 0,
-                    level: bits as u8,
-                });
-                ranges.push((child_start, child_end));
-                child_count += 1;
-                child_start = child_end;
-            }
-            // A D-bit group has at most 2^D distinct values, so a cell never exceeds its orthants.
-            debug_assert!(child_count as usize <= <Dim<D> as Morton<D>>::CHILDREN);
-            nodes[node].first_child = first_child;
-            nodes[node].child_count = child_count;
-            node += 1;
-        }
 
-        // 6a. Leaf centers of mass: the mean of the leaf's member points, computed in parallel per
-        // leaf. Internal centers come from the bottom-up reduction below. `count` is already set
-        // (the range length) for every node, so only the centers remain.
-        nodes
-            .par_iter_mut()
-            .zip(ranges.par_iter())
-            .with_min_len(PARALLEL_CODE_THRESHOLD)
-            .for_each(|(node, &(start, end))| {
-                if node.first_child == SENTINEL {
-                    let mut center = [T::zero(); D];
-                    for slot in start..end {
-                        let index = sorted[slot as usize].1 as usize;
-                        let point = &y[index * D..index * D + D];
-                        for axis in 0..D {
-                            center[axis] += point[axis];
-                        }
+                // Tightest enclosing level: the highest bit at which the range's extreme codes differ
+                // sits in the D-bit group that first splits the range, so the node skips straight to
+                // that level rather than emitting single-child chains.
+                let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
+                let highest_diff = 63 - xor.leading_zeros();
+                let level = (bits - 1) - highest_diff / D as u32;
+                let shift = D as u32 * (bits - 1 - level);
+                nodes[node].level = level as u8;
+
+                let first_child = nodes.len() as u32;
+                let mut child_count: u8 = 0;
+                let mut child_start = start;
+                while child_start < end {
+                    let group = (sorted[child_start as usize].0 >> shift) & mask;
+                    let mut child_end = child_start + 1;
+                    while child_end < end && (sorted[child_end as usize].0 >> shift) & mask == group
+                    {
+                        child_end += 1;
                     }
-                    let inverse = T::one() / T::from(node.count).unwrap();
+                    nodes.push(Node {
+                        center_of_mass: [T::zero(); D],
+                        count: (child_end - child_start),
+                        first_child: SENTINEL,
+                        child_count: 0,
+                        level: bits as u8,
+                    });
+                    ranges.push((child_start, child_end));
+                    child_count += 1;
+                    child_start = child_end;
+                }
+                // A D-bit group has at most 2^D distinct values, so a cell never exceeds its orthants.
+                debug_assert!(child_count as usize <= <Dim<D> as Morton<D>>::CHILDREN);
+                nodes[node].first_child = first_child;
+                nodes[node].child_count = child_count;
+                node += 1;
+            }
+
+            // 6a. Leaf centers of mass: the mean of the leaf's member points, computed in parallel
+            // per leaf. Internal centers come from the bottom-up reduction below. `count` is already
+            // set (the range length) for every node, so only the centers remain.
+            nodes
+                .par_iter_mut()
+                .zip(ranges.par_iter())
+                .with_min_len(PARALLEL_CODE_THRESHOLD)
+                .for_each(|(node, &(start, end))| {
+                    if node.first_child == SENTINEL {
+                        let mut center = [T::zero(); D];
+                        for slot in start..end {
+                            let index = sorted[slot as usize].1 as usize;
+                            let point = &y[index * D..index * D + D];
+                            for axis in 0..D {
+                                center[axis] += point[axis];
+                            }
+                        }
+                        let inverse = T::from(node.count).unwrap().recip();
+                        center
+                            .iter_mut()
+                            .for_each(|value| *value = *value * inverse);
+                        node.center_of_mass = center;
+                    }
+                });
+
+            // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
+            // their parent (breadth-first emission), so a reverse pass sees every child finished, a
+            // count-weighted hierarchical average.
+            for node in (0..nodes.len()).rev() {
+                if nodes[node].first_child == SENTINEL {
+                    continue;
+                }
+                let first_child = nodes[node].first_child as usize;
+                let child_count = nodes[node].child_count as usize;
+                let total = T::from(nodes[node].count).unwrap();
+                let mut center = [T::zero(); D];
+                for child in &nodes[first_child..first_child + child_count] {
+                    let weight = T::from(child.count).unwrap();
                     center
                         .iter_mut()
-                        .for_each(|value| *value = *value * inverse);
-                    node.center_of_mass = center;
+                        .zip(child.center_of_mass.iter())
+                        .for_each(|(value, &component)| *value += component * weight);
                 }
-            });
-
-        // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
-        // their parent (breadth-first emission), so a reverse pass sees every child finished, a
-        // count-weighted hierarchical average.
-        for node in (0..nodes.len()).rev() {
-            if nodes[node].first_child == SENTINEL {
-                continue;
-            }
-            let first_child = nodes[node].first_child as usize;
-            let child_count = nodes[node].child_count as usize;
-            let total = T::from(nodes[node].count).unwrap();
-            let mut center = [T::zero(); D];
-            for child in &nodes[first_child..first_child + child_count] {
-                let weight = T::from(child.count).unwrap();
+                let inverse = total.recip();
                 center
                     .iter_mut()
-                    .zip(child.center_of_mass.iter())
-                    .for_each(|(value, &component)| *value += component * weight);
+                    .for_each(|value| *value = *value * inverse);
+                nodes[node].center_of_mass = center;
             }
-            let inverse = T::one() / total;
-            center
-                .iter_mut()
-                .for_each(|value| *value = *value * inverse);
-            nodes[node].center_of_mass = center;
-        }
 
-        // Point conservation: every input point lands in exactly one leaf, so the leaf masses must
-        // sum to the input count. Morton quantization guarantees this, but the check guards the
-        // breadth-first range bookkeeping. Kept as a release assert because correctness is not
-        // relaxed.
-        let leaf_mass: u64 = nodes
-            .iter()
-            .filter(|node| node.first_child == SENTINEL)
-            .map(|node| node.count as u64)
-            .sum();
-        assert_eq!(
-            leaf_mass as usize, n_samples,
-            "arena lost or invented points: {leaf_mass} in leaves != {n_samples}"
-        );
+            // Point conservation: every input point lands in exactly one leaf, so the leaf masses
+            // must sum to the input count. Morton quantization guarantees this, but the check guards
+            // the breadth-first range bookkeeping. Kept as a release assert because correctness is
+            // not relaxed.
+            let leaf_mass: u64 = nodes
+                .iter()
+                .filter(|node| node.first_child == SENTINEL)
+                .map(|node| node.count as u64)
+                .sum();
+            assert_eq!(
+                leaf_mass as usize, n_samples,
+                "arena lost or invented points: {leaf_mass} in leaves != {n_samples}"
+            );
 
-        let coms_within_cells = if cfg!(debug_assertions) {
-            check_coms_within_cells::<T, D>(&nodes, &ranges, &sorted, &min, &extent, bits)
-        } else {
-            true
+            if cfg!(debug_assertions) {
+                check_coms_within_cells::<T, D>(nodes, ranges, sorted, &min, &extent, bits)
+            } else {
+                true
+            }
         };
-
-        Self {
-            nodes,
-            level_half_width_sq,
-            coms_within_cells,
-        }
+        self.coms_within_cells = coms_within_cells;
     }
 
     /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
@@ -361,7 +402,7 @@ where
             }
 
             // Summarize the cell by its center of mass.
-            let inverse = T::one() / (T::one() + distance);
+            let inverse = (T::one() + distance).recip();
             let mut magnitude = T::from(node.count).unwrap() * inverse;
             *q_sum += magnitude;
             magnitude = magnitude * inverse;
