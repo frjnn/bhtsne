@@ -426,7 +426,7 @@ pub(super) fn stop_lying<T: Float + Send + Sync + MulAssign>(
     p_values: &mut [T],
     early_exaggeration: T,
 ) {
-    let scale = T::one() / early_exaggeration;
+    let scale = early_exaggeration.recip();
     p_values.par_iter_mut().for_each(|p| *p *= scale);
 }
 
@@ -498,10 +498,10 @@ where
     q_values
         .par_iter_mut()
         .zip(distances.par_iter())
-        .for_each(|(q, d)| *q = T::one() / (T::one() + *d));
+        .for_each(|(q, d)| *q = (T::one() + *d).recip());
 
     let q_sum = q_values.par_iter().map(|q| *q).sum::<T>();
-    let inverse_q_sum = T::one() / q_sum;
+    let inverse_q_sum = q_sum.recip();
     q_values
         .par_iter_mut()
         .for_each(|q| *q = *q * inverse_q_sum);
@@ -568,7 +568,7 @@ where
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
     };
-    let inverse_q_sum = T::one() / q_sum;
+    let inverse_q_sum = q_sum.recip();
 
     let mut partials: Vec<T> = vec![T::zero(); n_samples];
 
@@ -586,7 +586,7 @@ where
                     .zip(sample_b.iter())
                     .map(|(a, b)| (*a - *b).powi(2))
                     .sum::<T>();
-                q = (T::one() / (T::one() + q)) * inverse_q_sum;
+                q = (T::one() + q).recip() * inverse_q_sum;
 
                 // Kullback-Leibler divergence.
                 *cost += p_values[index]
