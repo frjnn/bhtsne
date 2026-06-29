@@ -296,10 +296,11 @@ pub(super) fn symmetrize_sparse_matrix<T>(
     p_columns
         .par_chunks_mut(*n_neighbors)
         .zip(p_values.par_chunks_mut(*n_neighbors))
-        .for_each(|(cols, vals)| {
-            let mut row: Vec<(u32, T)> = cols.iter().copied().zip(vals.iter().copied()).collect();
-            row.sort_unstable_by_key(|(col, _)| *col);
-            for (j, (col, val)) in row.into_iter().enumerate() {
+        .for_each_init(Vec::<(u32, T)>::new, |row, (cols, vals)| {
+            row.clear();
+            row.extend(cols.iter().copied().zip(vals.iter().copied()));
+            row.sort_unstable_by_key(|(c, _)| *c);
+            for (j, &(col, val)) in row.iter().enumerate() {
                 cols[j] = col;
                 vals[j] = val;
             }
