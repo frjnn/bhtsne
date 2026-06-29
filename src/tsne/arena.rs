@@ -57,10 +57,6 @@ pub(crate) struct Arena<T, const D: usize> {
     /// acceptance test compares this against `theta^2 * dist`, the squared form of the reference
     /// `max_half_width / sqrt(dist) < theta`, avoiding a square root per visit.
     level_half_width_sq: Vec<T>,
-    /// Result of the build-time center-of-mass-within-cell invariant check. Computed only in debug
-    /// builds (the geometric check is a structural guard, not a release hot-path cost), and left
-    /// `true` in release where [`Arena::centers_of_mass_within_cells`] reports it vacuously.
-    coms_within_cells: bool,
 }
 
 /// Per-axis bounding box of the embedding, reduced in parallel.
@@ -104,7 +100,6 @@ where
             ranges: Vec::new(),
             sorted: Vec::new(),
             level_half_width_sq: Vec::new(),
-            coms_within_cells: true,
         }
     }
 
@@ -142,7 +137,6 @@ where
         self.nodes.clear();
         self.ranges.clear();
         self.sorted.clear();
-        self.coms_within_cells = true;
 
         if n_samples == 0 {
             self.level_half_width_sq.clear();
@@ -191,147 +185,141 @@ where
         );
         self.sorted.par_sort_unstable_by_key(|&(code, _)| code);
 
-        let coms_within_cells = {
-            let sorted = &self.sorted;
-            let nodes = &mut self.nodes;
-            let ranges = &mut self.ranges;
+        let sorted = &self.sorted;
+        let nodes = &mut self.nodes;
+        let ranges = &mut self.ranges;
 
-            // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
-            // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
-            // node's window in `sorted`. Every internal node has at least two children (single-child
-            // chains are skipped by the tightest-enclosing-level jump), so an arena over `n` points
-            // holds at most `2n - 1` nodes; reserving that up front lets the sequential emission push
-            // without reallocating (a no-op once the buffers have grown on the first epoch).
-            nodes.reserve(2 * n_samples - 1);
-            ranges.reserve(2 * n_samples - 1);
-            nodes.push(Node {
-                center_of_mass: [T::zero(); D],
-                count: n_samples as u32,
-                first_child: SENTINEL,
-                child_count: 0,
-                level: bits as u8,
-            });
-            ranges.push((0, n_samples as u32));
+        // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
+        // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
+        // node's window in `sorted`. Every internal node has at least two children (single-child
+        // chains are skipped by the tightest-enclosing-level jump), so an arena over `n` points
+        // holds at most `2n - 1` nodes; reserving that up front lets the sequential emission push
+        // without reallocating (a no-op once the buffers have grown on the first epoch).
+        nodes.reserve(2 * n_samples - 1);
+        ranges.reserve(2 * n_samples - 1);
+        nodes.push(Node {
+            center_of_mass: [T::zero(); D],
+            count: n_samples as u32,
+            first_child: SENTINEL,
+            child_count: 0,
+            level: bits as u8,
+        });
+        ranges.push((0, n_samples as u32));
 
-            let mask = (1u64 << D) - 1;
-            let mut node = 0usize;
-            while node < nodes.len() {
-                let (start, end) = ranges[node];
-                // A single point, or a cell of points that share a full code (closer than one grid
-                // cell, the duplicate case), is a leaf. Sorted codes make the all-equal test O(1).
-                if end - start <= 1 || sorted[start as usize].0 == sorted[(end - 1) as usize].0 {
-                    node += 1;
-                    continue;
-                }
-
-                // Tightest enclosing level: the highest bit at which the range's extreme codes differ
-                // sits in the D-bit group that first splits the range, so the node skips straight to
-                // that level rather than emitting single-child chains.
-                let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
-                let highest_diff = 63 - xor.leading_zeros();
-                let level = (bits - 1) - highest_diff / D as u32;
-                let shift = D as u32 * (bits - 1 - level);
-                nodes[node].level = level as u8;
-
-                let first_child = nodes.len() as u32;
-                let mut child_count: u8 = 0;
-                let mut child_start = start;
-                while child_start < end {
-                    let group = (sorted[child_start as usize].0 >> shift) & mask;
-                    let mut child_end = child_start + 1;
-                    while child_end < end && (sorted[child_end as usize].0 >> shift) & mask == group
-                    {
-                        child_end += 1;
-                    }
-                    nodes.push(Node {
-                        center_of_mass: [T::zero(); D],
-                        count: (child_end - child_start),
-                        first_child: SENTINEL,
-                        child_count: 0,
-                        level: bits as u8,
-                    });
-                    ranges.push((child_start, child_end));
-                    child_count += 1;
-                    child_start = child_end;
-                }
-                // A D-bit group has at most 2^D distinct values, so a cell never exceeds its orthants.
-                debug_assert!(child_count as usize <= <Dim<D> as Morton<D>>::CHILDREN);
-                nodes[node].first_child = first_child;
-                nodes[node].child_count = child_count;
+        let mask = (1u64 << D) - 1;
+        let mut node = 0usize;
+        while node < nodes.len() {
+            let (start, end) = ranges[node];
+            // A single point, or a cell of points that share a full code (closer than one grid
+            // cell, the duplicate case), is a leaf. Sorted codes make the all-equal test O(1).
+            if end - start <= 1 || sorted[start as usize].0 == sorted[(end - 1) as usize].0 {
                 node += 1;
+                continue;
             }
 
-            // 6a. Leaf centers of mass: the mean of the leaf's member points, computed in parallel
-            // per leaf. Internal centers come from the bottom-up reduction below. `count` is already
-            // set (the range length) for every node, so only the centers remain.
-            nodes
-                .par_iter_mut()
-                .zip(ranges.par_iter())
-                .with_min_len(PARALLEL_CODE_THRESHOLD)
-                .for_each(|(node, &(start, end))| {
-                    if node.first_child == SENTINEL {
-                        let mut center = [T::zero(); D];
-                        for slot in start..end {
-                            let index = sorted[slot as usize].1 as usize;
-                            let point = &y[index * D..index * D + D];
-                            for axis in 0..D {
-                                center[axis] += point[axis];
-                            }
-                        }
-                        let inverse = T::from(node.count).unwrap().recip();
-                        center
-                            .iter_mut()
-                            .for_each(|value| *value = *value * inverse);
-                        node.center_of_mass = center;
-                    }
-                });
+            // Tightest enclosing level: the highest bit at which the range's extreme codes differ
+            // sits in the D-bit group that first splits the range, so the node skips straight to
+            // that level rather than emitting single-child chains.
+            let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
+            let highest_diff = 63 - xor.leading_zeros();
+            let level = (bits - 1) - highest_diff / D as u32;
+            let shift = D as u32 * (bits - 1 - level);
+            nodes[node].level = level as u8;
 
-            // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
-            // their parent (breadth-first emission), so a reverse pass sees every child finished, a
-            // count-weighted hierarchical average.
-            for node in (0..nodes.len()).rev() {
-                if nodes[node].first_child == SENTINEL {
-                    continue;
+            let first_child = nodes.len() as u32;
+            let mut child_count: u8 = 0;
+            let mut child_start = start;
+            while child_start < end {
+                let group = (sorted[child_start as usize].0 >> shift) & mask;
+                let mut child_end = child_start + 1;
+                while child_end < end && (sorted[child_end as usize].0 >> shift) & mask == group {
+                    child_end += 1;
                 }
-                let first_child = nodes[node].first_child as usize;
-                let child_count = nodes[node].child_count as usize;
-                let total = T::from(nodes[node].count).unwrap();
-                let mut center = [T::zero(); D];
-                for child in &nodes[first_child..first_child + child_count] {
-                    let weight = T::from(child.count).unwrap();
+                nodes.push(Node {
+                    center_of_mass: [T::zero(); D],
+                    count: (child_end - child_start),
+                    first_child: SENTINEL,
+                    child_count: 0,
+                    level: bits as u8,
+                });
+                ranges.push((child_start, child_end));
+                child_count += 1;
+                child_start = child_end;
+            }
+            // A D-bit group has at most 2^D distinct values, so a cell never exceeds its orthants.
+            debug_assert!(child_count as usize <= <Dim<D> as Morton<D>>::CHILDREN);
+            nodes[node].first_child = first_child;
+            nodes[node].child_count = child_count;
+            node += 1;
+        }
+
+        // 6a. Leaf centers of mass: the mean of the leaf's member points, computed in parallel
+        // per leaf. Internal centers come from the bottom-up reduction below. `count` is already
+        // set (the range length) for every node, so only the centers remain.
+        nodes
+            .par_iter_mut()
+            .zip(ranges.par_iter())
+            .with_min_len(PARALLEL_CODE_THRESHOLD)
+            .for_each(|(node, &(start, end))| {
+                if node.first_child == SENTINEL {
+                    let mut center = [T::zero(); D];
+                    for slot in start..end {
+                        let index = sorted[slot as usize].1 as usize;
+                        let point = &y[index * D..index * D + D];
+                        for axis in 0..D {
+                            center[axis] += point[axis];
+                        }
+                    }
+                    let inverse = T::from(node.count).unwrap().recip();
                     center
                         .iter_mut()
-                        .zip(child.center_of_mass.iter())
-                        .for_each(|(value, &component)| *value += component * weight);
+                        .for_each(|value| *value = *value * inverse);
+                    node.center_of_mass = center;
                 }
-                let inverse = total.recip();
+            });
+
+        // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
+        // their parent (breadth-first emission), so a reverse pass sees every child finished, a
+        // count-weighted hierarchical average.
+        for node in (0..nodes.len()).rev() {
+            if nodes[node].first_child == SENTINEL {
+                continue;
+            }
+            let first_child = nodes[node].first_child as usize;
+            let child_count = nodes[node].child_count as usize;
+            let total = T::from(nodes[node].count).unwrap();
+            let mut center = [T::zero(); D];
+            for child in &nodes[first_child..first_child + child_count] {
+                let weight = T::from(child.count).unwrap();
                 center
                     .iter_mut()
-                    .for_each(|value| *value = *value * inverse);
-                nodes[node].center_of_mass = center;
+                    .zip(child.center_of_mass.iter())
+                    .for_each(|(value, &component)| *value += component * weight);
             }
+            let inverse = total.recip();
+            center
+                .iter_mut()
+                .for_each(|value| *value = *value * inverse);
+            nodes[node].center_of_mass = center;
+        }
 
-            // Point conservation: every input point lands in exactly one leaf, so the leaf masses
-            // must sum to the input count. Morton quantization guarantees this, but the check guards
-            // the breadth-first range bookkeeping. Kept as a release assert because correctness is
-            // not relaxed.
-            let leaf_mass: u64 = nodes
+        // Point conservation: every input point lands in exactly one leaf, so the leaf masses
+        // must sum to the input count. Morton quantization guarantees this, but the check guards
+        // the breadth-first range bookkeeping. Kept as a release assert because correctness is
+        // not relaxed.
+        debug_assert_eq!(
+            nodes
                 .iter()
                 .filter(|node| node.first_child == SENTINEL)
                 .map(|node| node.count as u64)
-                .sum();
-            assert_eq!(
-                leaf_mass as usize, n_samples,
-                "arena lost or invented points: {leaf_mass} in leaves != {n_samples}"
-            );
+                .sum::<u64>() as usize,
+            n_samples,
+            "arena lost or invented points"
+        );
 
-            if cfg!(debug_assertions) {
-                check_coms_within_cells::<T, D>(nodes, ranges, sorted, &min, &extent, bits)
-            } else {
-                true
-            }
-        };
-        self.coms_within_cells = coms_within_cells;
+        debug_assert!(check_coms_within_cells::<T, D>(
+            nodes, ranges, sorted, &min, &extent, bits
+        ));
     }
 
     /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
@@ -339,14 +327,6 @@ where
     #[cfg(test)]
     pub(crate) fn root_count(&self) -> usize {
         self.nodes.first().map_or(0, |node| node.count as usize)
-    }
-
-    /// Whether every cell's center of mass lies within its own Morton cell, allowing a small slack
-    /// for floating point error. A correct build satisfies this because a center of mass is the
-    /// convex combination of points the cell contains. Only meaningful in debug builds (see
-    /// `coms_within_cells`); reports `true` in release.
-    pub(crate) fn centers_of_mass_within_cells(&self) -> bool {
-        self.coms_within_cells
     }
 
     /// Accumulates the non-edge (repulsive) Barnes-Hut forces on point `index` into
@@ -466,12 +446,15 @@ where
         let level = node.level as u32;
         let coords = <Dim<D> as Morton<D>>::decode(sorted[start as usize].0);
         let cells = T::from(1u64 << level).unwrap();
+
         (0..D).all(|axis| {
             let width = extent[axis] / cells;
             let cell_index = T::from((coords[axis] as u64) >> (bits - level)).unwrap();
             let low = min[axis] + cell_index * width;
             let high = low + width;
-            let slack = slack_fraction * extent[axis] + T::min_positive_value();
+            let magnitude = low.abs().max(high.abs());
+            let slack = slack_fraction * (extent[axis] + magnitude) + T::min_positive_value();
+
             node.center_of_mass[axis] >= low - slack && node.center_of_mass[axis] <= high + slack
         })
     })
@@ -517,7 +500,6 @@ mod tests {
         }
         let arena = Arena::<f32, 2>::new(&data, N);
         assert_eq!(arena.root_count(), N);
-        assert!(arena.centers_of_mass_within_cells());
     }
 
     #[test]
@@ -526,7 +508,6 @@ mod tests {
         let data = lcg_cloud(N, 3, 23);
         let arena = Arena::<f32, 3>::new(&data, N);
         assert_eq!(arena.root_count(), N);
-        assert!(arena.centers_of_mass_within_cells());
     }
 
     /// The root center of mass is the mean of all points, regardless of tree structure.
