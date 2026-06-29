@@ -291,24 +291,19 @@ pub(super) fn symmetrize_sparse_matrix<T>(
 ) where
     T: Float + Add + DivAssign + Send + Sync + MulAssign,
 {
-    // Sort each neighbor row so we can binary-search instead of scanning linearly.
-    // Apply the same permutation to p_values so (column, value) pairs stay paired.
-    for n in 0..n_samples {
-        let start = n * n_neighbors;
-        let end = start + n_neighbors;
-        if end <= p_columns.len() && end <= p_values.len() {
-            let mut indexed: Vec<(u32, T)> = p_columns[start..end]
-                .iter()
-                .copied()
-                .zip(p_values[start..end].iter().copied())
-                .collect();
-            indexed.sort_by_key(|(col, _)| *col);
-            for (j, (col, val)) in indexed.into_iter().enumerate() {
-                p_columns[start + j] = col;
-                p_values[start + j] = val;
+    // Sort each neighbor row so the lookups below can binary-search. Rows are
+    // independent and columns unique within a row, hence parallel and unstable.
+    p_columns
+        .par_chunks_mut(*n_neighbors)
+        .zip(p_values.par_chunks_mut(*n_neighbors))
+        .for_each(|(cols, vals)| {
+            let mut row: Vec<(u32, T)> = cols.iter().copied().zip(vals.iter().copied()).collect();
+            row.sort_unstable_by_key(|(col, _)| *col);
+            for (j, (col, val)) in row.into_iter().enumerate() {
+                cols[j] = col;
+                vals[j] = val;
             }
-        }
-    }
+        });
 
     // Neighbor indices are stored as u32 to halve the index memory at large n; `col` reads one as a
     // usize wherever it is used to index into a buffer.
