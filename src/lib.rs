@@ -431,15 +431,14 @@ where
                 &self.y,
                 n_samples,
             )),
-            Fit::BarnesHut { theta } => Some(tsne::evaluate_error_approximately::<T, D>(
+            Fit::BarnesHut { theta } => Some(BarnesHutRepulsion::<T, D>::new(*theta).error(
                 &self.p_rows,
                 &self.p_columns,
                 &self.p_values,
                 &self.y,
                 n_samples,
-                *theta,
             )),
-            Fit::Interpolated => Some(tsne::evaluate_error_interpolated::<T, D>(
+            Fit::Interpolated => Some(InterpolatedRepulsion::<T, D>::new().error(
                 &self.p_rows,
                 &self.p_columns,
                 &self.p_values,
@@ -633,7 +632,7 @@ where
     }
 
     /// Normalizes P, undoes the early exaggeration if disabled, and seeds the
-    /// embedding. Shared by `exact` and `barnes_hut_fit`.
+    /// embedding. Shared by `exact` and `approximate_fit`.
     fn finalize_p_and_seed(&mut self, grad_entries: usize) {
         // Normalize P values.
         tsne::normalize_p_values(&mut self.p_values, self.early_exaggeration);
@@ -682,7 +681,11 @@ where
 
         let n_samples = self.data.len();
         if self.has_cached_affinities(n_samples) {
-            return self.run_cached_affinities(theta, n_samples);
+            return self.run_cached(
+                n_samples,
+                BarnesHutRepulsion::new(theta),
+                Fit::BarnesHut { theta },
+            );
         }
         // No cached affinities or mismatched dataset, rebuild.
         let data = self.data;
@@ -691,10 +694,9 @@ where
         // Build ball tree on the data set.
         let tree = tsne::vptree::VPTree::new(data, &metric_f);
 
-        // The `move` closure owns the tree so `barnes_hut_fit` can drop it before
+        // The `move` closure owns the tree so `build_affinities` can drop it before
         // the training loop. The `+ 1` is the sample itself, excluded by the search.
-        self.barnes_hut_fit(
-            theta,
+        self.approximate_fit(
             n_neighbors,
             move |index, p_columns_row, distances_row| {
                 tree.search(
@@ -706,6 +708,8 @@ where
                     &metric_f,
                 );
             },
+            BarnesHutRepulsion::new(theta),
+            Fit::BarnesHut { theta },
         )
     }
 
@@ -730,28 +734,13 @@ where
     where
         Dim<D>: Morton<D>,
     {
-        let n_samples = self.data.len();
-        let n_neighbors = self.check_neighbors(neighbors);
-
-        // If cached affinities encode the same neighbors, reuse them.
-        // Indices are provably valid from the run that produced the cache.
-        if self.cached_affinities_match_neighbors(neighbors) {
-            return self.run_cached_affinities(theta, n_samples);
-        }
-
-        // Cache miss: indices will be used, validate them.
-        self.assert_neighbor_indices_in_range(neighbors);
-
-        self.barnes_hut_fit(theta, n_neighbors, |index, p_columns_row, distances_row| {
-            p_columns_row
-                .iter_mut()
-                .zip(distances_row.iter_mut())
-                .zip(neighbors[index].iter())
-                .for_each(|((column, distance), neighbor)| {
-                    *column = neighbor.index as u32;
-                    *distance = neighbor.distance;
-                });
-        })
+        // Reject a bad theta up front, on the cached path too, matching `barnes_hut`.
+        self.validate_fit_params(theta);
+        self.approximate_fit_with_neighbors(
+            neighbors,
+            BarnesHutRepulsion::new(theta),
+            Fit::BarnesHut { theta },
+        )
     }
 
     /// Validates the shape of a caller-supplied neighbor table and returns the
@@ -826,7 +815,7 @@ where
 
         let n_samples = self.data.len();
         if self.has_cached_affinities(n_samples) {
-            return self.run_cached_affinities_interpolated(n_samples);
+            return self.run_cached(n_samples, InterpolatedRepulsion::new(), Fit::Interpolated);
         }
 
         // No cached affinities or mismatched dataset, rebuild.
@@ -836,16 +825,21 @@ where
         // Build the vantage point tree on the data set.
         let tree = tsne::vptree::VPTree::new(data, &metric_f);
 
-        self.interpolated_fit(n_neighbors, move |index, p_columns_row, distances_row| {
-            tree.search(
-                &data[index],
-                index,
-                n_neighbors + 1,
-                p_columns_row,
-                distances_row,
-                &metric_f,
-            );
-        })
+        self.approximate_fit(
+            n_neighbors,
+            move |index, p_columns_row, distances_row| {
+                tree.search(
+                    &data[index],
+                    index,
+                    n_neighbors + 1,
+                    p_columns_row,
+                    distances_row,
+                    &metric_f,
+                );
+            },
+            InterpolatedRepulsion::new(),
+            Fit::Interpolated,
+        )
     }
 
     /// Like [`fit_sne`], but uses caller-supplied nearest neighbors instead of a
@@ -864,99 +858,103 @@ where
         T: FftNum,
         Dim<D>: FftDim,
     {
-        let n_samples = self.data.len();
-        let n_neighbors = self.check_neighbors(neighbors);
-
-        // If cached affinities encode the same neighbors, reuse them.
-        if self.cached_affinities_match_neighbors(neighbors) {
-            return self.run_cached_affinities_interpolated(n_samples);
-        }
-
-        // Cache miss: indices will be used, validate them.
-        self.assert_neighbor_indices_in_range(neighbors);
-
-        self.interpolated_fit(n_neighbors, |index, p_columns_row, distances_row| {
-            p_columns_row
-                .iter_mut()
-                .zip(distances_row.iter_mut())
-                .zip(neighbors[index].iter())
-                .for_each(|((column, distance), neighbor)| {
-                    *column = neighbor.index as u32;
-                    *distance = neighbor.distance;
-                });
-        })
+        self.approximate_fit_with_neighbors(
+            neighbors,
+            InterpolatedRepulsion::new(),
+            Fit::Interpolated,
+        )
     }
 
     /// Builds the affinity graph through `fill_neighbors`, normalizes and seeds, then
-    /// runs the FIt-SNE optimization loop. The interpolation counterpart of
-    /// [`barnes_hut_fit`].
-    ///
-    /// [`barnes_hut_fit`]: tSNE::barnes_hut_fit
-    fn interpolated_fit<F>(&mut self, n_neighbors: usize, fill_neighbors: F) -> &mut Self
+    /// runs the optimization loop with `strategy`. The shared body of every approximate
+    /// fit from a freshly built graph, vantage-point-tree or caller-supplied neighbors,
+    /// Barnes-Hut or FIt-SNE.
+    fn approximate_fit<R, F>(
+        &mut self,
+        n_neighbors: usize,
+        fill_neighbors: F,
+        strategy: R,
+        fit: Fit<T>,
+    ) -> &mut Self
     where
+        R: Repulsion<T, D>,
         F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
-        T: FftNum,
-        Dim<D>: FftDim,
     {
         let grad_entries = self.build_affinities(n_neighbors, fill_neighbors);
         // Normalize P, disable the early exaggeration if requested, and seed the embedding.
         self.finalize_p_and_seed(grad_entries);
-        self.fit_sne_run_loop(grad_entries)
+        self.run_loop(grad_entries, strategy, fit)
     }
 
-    /// Runs the FIt-SNE epoch loop. Called after the affinity graph is built,
-    /// normalized, and the embedding seeded.
+    /// Shared body of the two `*_with_neighbors` entry points: validates the neighbor
+    /// table's shape, reuses cached affinities when they encode the same neighbors, and
+    /// otherwise builds the graph from the caller-supplied neighbors and fits with
+    /// `strategy`. The repulsion strategy and the [`Fit`] marker are the only
+    /// differences between the Barnes-Hut and FIt-SNE variants.
+    fn approximate_fit_with_neighbors<R>(
+        &mut self,
+        neighbors: &[Vec<Neighbor<T>>],
+        strategy: R,
+        fit: Fit<T>,
+    ) -> &mut Self
+    where
+        R: Repulsion<T, D>,
+    {
+        let n_samples = self.data.len();
+        let n_neighbors = self.check_neighbors(neighbors);
+
+        // If cached affinities encode the same neighbors, reuse them. Their indices are
+        // provably valid from the run that produced the cache.
+        if self.cached_affinities_match_neighbors(neighbors) {
+            return self.run_cached(n_samples, strategy, fit);
+        }
+
+        // Cache miss: indices will be dereferenced, validate them.
+        self.assert_neighbor_indices_in_range(neighbors);
+
+        self.approximate_fit(
+            n_neighbors,
+            |index, p_columns_row, distances_row| {
+                copy_neighbor_row(neighbors, index, p_columns_row, distances_row);
+            },
+            strategy,
+            fit,
+        )
+    }
+
+    /// Runs the optimization epoch loop with a pluggable repulsion `strategy`. Called
+    /// after the affinity graph is built, normalized, and the embedding seeded.
     ///
-    /// Each epoch computes the attractive forces from the sparse graph exactly as the
-    /// Barnes-Hut loop does, draws the repulsive forces and the `Q` normalizer from
-    /// the FFT interpolation, and feeds both into the shared
-    /// [`gradient_descent_step`]. The attractive force, the fused update, and the
-    /// zero-mean recentering are therefore identical to the Barnes-Hut path; only the
-    /// repulsion strategy differs.
+    /// `fit` is the marker recorded on completion so [`kl_divergence`] can pick the
+    /// matching cost evaluation.
     ///
     /// [`gradient_descent_step`]: tsne::gradient_descent_step
-    fn fit_sne_run_loop(&mut self, grad_entries: usize) -> &mut Self
+    /// [`kl_divergence`]: tSNE::kl_divergence
+    fn run_loop<R>(&mut self, grad_entries: usize, mut strategy: R, fit: Fit<T>) -> &mut Self
     where
-        T: FftNum,
-        Dim<D>: FftDim,
+        R: Repulsion<T, D>,
     {
         let n_samples = self.data.len();
         // Attractive and repulsive force buffers, reused across epochs.
         let mut positive_forces: Vec<T> = vec![T::zero(); grad_entries];
         let mut negative_forces: Vec<T> = vec![T::zero(); grad_entries];
 
-        // Interpolation workspace, grown in place as the embedding spreads.
-        let mut interpolant = tsne::interpolation::Interpolant::<T, D>::new();
-
         // The callback is detached from self for the fit so the epoch loop is free
         // to borrow the other fields mutably; it is put back once the loop ends.
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
         for epoch in 0..self.epochs {
-            // Attractive (positive) forces from the sparse graph, parallel per sample.
-            // Identical to the Barnes-Hut edge forces, hence the shared routine.
-            positive_forces
-                .par_chunks_mut(D)
-                .enumerate()
-                .for_each(|(index, row)| {
-                    let row: &mut [T; D] = row.try_into().unwrap();
-                    *row = [T::zero(); D];
-                    tsne::arena::compute_edge_forces::<T, D>(
-                        index,
-                        &self.y,
-                        &self.p_rows,
-                        &self.p_columns,
-                        &self.p_values,
-                        row,
-                    );
-                });
+            // Forces and the reciprocal of the Q normalizer Z from the repulsion strategy.
+            let inverse_norm = strategy.step(
+                &self.y,
+                &self.p_rows,
+                &self.p_columns,
+                &self.p_values,
+                &mut positive_forces,
+                &mut negative_forces,
+            );
 
-            // Repulsive (negative) forces and the Q normalizer Z via FFT interpolation.
-            let mut z = T::zero();
-            interpolant.repulsive_forces(&self.y, n_samples, &mut negative_forces, &mut z);
-            let inverse_z = z.recip();
-
-            // Fuse the gradient (`positive - negative * inverse_z`) into the update.
+            // Fuse the gradient (`positive - negative * inverse_norm`) into the update.
             let learning_rate = self.resolve_learning_rate(n_samples);
             tsne::gradient_descent_step::<T, D>(
                 &mut self.y,
@@ -964,9 +962,11 @@ where
                 &negative_forces,
                 &mut self.uy,
                 &mut self.gains,
-                learning_rate,
-                self.momentum,
-                inverse_z,
+                tsne::GradientStep {
+                    learning_rate,
+                    momentum: self.momentum,
+                    inverse_norm,
+                },
             );
 
             // Make the solution zero mean.
@@ -978,7 +978,7 @@ where
         self.epoch_callback = epoch_callback;
         // Clears buffers used for fitting.
         tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
-        self.fit = Some(Fit::Interpolated);
+        self.fit = Some(fit);
 
         self
     }
@@ -1019,19 +1019,6 @@ where
         self.cached_perplexity = Some(self.perplexity);
 
         self
-    }
-    /// writes sample `index`'s neighbor indices and distances; the rest is common.
-    fn barnes_hut_fit<F>(&mut self, theta: T, n_neighbors: usize, fill_neighbors: F) -> &mut Self
-    where
-        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
-        Dim<D>: Morton<D>,
-    {
-        // Idempotent: `barnes_hut` already validated before building its tree.
-        self.validate_fit_params(theta);
-        let grad_entries = self.build_affinities(n_neighbors, fill_neighbors);
-
-        // Normalize P, seed the embedding, then run the optimization loop.
-        self.barnes_hut_optimize(theta, grad_entries)
     }
 
     /// Builds the sparse, symmetric affinity graph `P` shared by every approximate
@@ -1105,153 +1092,6 @@ where
         self.cached_perplexity = Some(self.perplexity);
 
         grad_entries
-    }
-
-    /// Runs the Barnes-Hut optimization loop. Normalizes P (applying
-    /// exaggeration), seeds the embedding, then runs the epoch loop.
-    fn barnes_hut_optimize(&mut self, theta: T, grad_entries: usize) -> &mut Self
-    where
-        Dim<D>: Morton<D>,
-    {
-        // Normalize P, disable the early exaggeration if requested, and seed the embedding.
-        self.finalize_p_and_seed(grad_entries);
-
-        self.barnes_hut_run_loop(theta, grad_entries)
-    }
-
-    /// Runs the Barnes-Hut epoch loop. Called after setup (normalization,
-    /// seeding) is complete. The caller must have `self.p_rows` /
-    /// `self.p_columns` / `self.p_values` populated.
-    fn barnes_hut_run_loop(&mut self, theta: T, grad_entries: usize) -> &mut Self
-    where
-        Dim<D>: Morton<D>,
-    {
-        // Prepares buffers for Barnes-Hut algorithm.
-        let mut positive_forces: Vec<T> = vec![T::zero(); grad_entries];
-        let mut negative_forces: Vec<T> = vec![T::zero(); grad_entries];
-
-        // Per-sample contribution to the Q normalization term, reduced after the force pass.
-        let mut q_sums: Vec<T> = vec![T::zero(); self.data.len()];
-
-        // Per-dimension means for the zero-mean recentering, reused across epochs.
-        let mut means: Vec<T> = vec![T::zero(); D];
-        // The callback is detached from self for the fit so the epoch loop is free
-        // to borrow the other fields mutably; it is put back once the loop ends.
-        let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
-
-        // The theta acceptance test uses the squared form, so precompute theta squared once.
-        let n_samples = self.data.len();
-        let theta_sq = theta * theta;
-
-        // One arena, rebuilt in place each epoch so it reuses its buffers instead of
-        // reallocating every epoch.
-        let mut arena = tsne::arena::Arena::<T, D>::empty();
-
-        // Main Training loop.
-        for epoch in 0..self.epochs {
-            // Rebuild the Morton arena over the current embedding.
-            arena.rebuild(&self.y, n_samples);
-            debug_assert!(
-                arena.centers_of_mass_within_cells(),
-                "error: arena centre of mass escaped its cell."
-            );
-
-            // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its
-            // q_sum term. The attractive pass reads coordinates directly, the repulsive pass walks
-            // the arena with a fixed-size stack. The stack lives in the `for_each_init` state, a
-            // stack-allocated array so the traversal never touches the heap: rayon calls the init
-            // once per work split, so a heap stack here would allocate per split and collapse the
-            // scaling at high thread counts.
-            positive_forces
-                .par_chunks_mut(D)
-                .zip(negative_forces.par_chunks_mut(D))
-                .zip(q_sums.par_iter_mut())
-                .enumerate()
-                .for_each_init(
-                    || {
-                        (
-                            [T::zero(); D],
-                            [T::zero(); D],
-                            [0u32; tsne::arena::STACK_CAP],
-                        )
-                    },
-                    |(edge_row, nonedge_row, stack),
-                     (index, ((positive_out, negative_out), q_sum_out))| {
-                        // Write each output row once to avoid false sharing.
-                        *edge_row = [T::zero(); D];
-                        *nonedge_row = [T::zero(); D];
-                        let mut q_sum = T::zero();
-                        tsne::arena::compute_edge_forces::<T, D>(
-                            index,
-                            &self.y,
-                            &self.p_rows,
-                            &self.p_columns,
-                            &self.p_values,
-                            edge_row,
-                        );
-                        arena.compute_non_edge_forces(
-                            index,
-                            theta_sq,
-                            &self.y,
-                            nonedge_row,
-                            &mut q_sum,
-                            stack,
-                        );
-                        positive_out.copy_from_slice(&edge_row[..]);
-                        negative_out.copy_from_slice(&nonedge_row[..]);
-                        *q_sum_out = q_sum;
-                    },
-                );
-
-            // Sequential q_sum: barrier-free and negligible against the forces. The reciprocal is
-            // precomputed so the fused update multiplies instead of dividing per value.
-            let q_sum: T = q_sums.iter().copied().sum();
-            let inverse_q_sum = q_sum.recip();
-
-            // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
-            // update, so it needs no separate buffer or sweep.
-            let learning_rate = self.resolve_learning_rate(n_samples);
-            tsne::gradient_descent_step::<T, D>(
-                &mut self.y,
-                &positive_forces,
-                &negative_forces,
-                &mut self.uy,
-                &mut self.gains,
-                learning_rate,
-                self.momentum,
-                inverse_q_sum,
-            );
-
-            // Recenter (zero mean). The per-dimension sums accumulate sequentially (barrier-free),
-            // so only the subtraction is a parallel pass.
-            means.iter_mut().for_each(|mean| *mean = T::zero());
-            self.y.chunks_exact(D).for_each(|sample| {
-                means
-                    .iter_mut()
-                    .zip(sample.iter())
-                    .for_each(|(mean, &value)| *mean += value);
-            });
-            let den = T::from(n_samples).unwrap().recip();
-            means.iter_mut().for_each(|mean| *mean *= den);
-            self.y
-                .par_chunks_mut(D)
-                .with_min_len(PARALLEL_CODE_THRESHOLD)
-                .for_each(|sample| {
-                    sample
-                        .iter_mut()
-                        .zip(means.iter())
-                        .for_each(|(value, &mean)| *value -= mean);
-                });
-
-            self.epoch_tail(epoch, &mut epoch_callback, &mut snapshot);
-        }
-        // Puts the callback back in place.
-        self.epoch_callback = epoch_callback;
-        // Clears buffers used for fitting.
-        tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
-        self.fit = Some(Fit::BarnesHut { theta });
-
-        self
     }
 
     /// Detaches the epoch callback from `self` for the duration of a fit, so the
@@ -1362,25 +1202,16 @@ where
         grad_entries
     }
 
-    /// Runs the Barnes-Hut cached-affinities optimization path.
-    fn run_cached_affinities(&mut self, theta: T, n_samples: usize) -> &mut Self
+    /// Reuses the cached affinity graph: prepares the optimization buffers, seeds the
+    /// embedding, and runs the loop with `strategy`. Shared by the Barnes-Hut and
+    /// FIt-SNE cached paths, which differ only in the strategy and the [`Fit`] marker.
+    fn run_cached<R>(&mut self, n_samples: usize, strategy: R, fit: Fit<T>) -> &mut Self
     where
-        Dim<D>: Morton<D>,
+        R: Repulsion<T, D>,
     {
         let grad_entries = self.prepare_cached(n_samples);
 
-        self.barnes_hut_run_loop(theta, grad_entries)
-    }
-
-    /// Runs the FIt-SNE cached-affinities optimization path.
-    fn run_cached_affinities_interpolated(&mut self, n_samples: usize) -> &mut Self
-    where
-        T: FftNum,
-        Dim<D>: FftDim,
-    {
-        let grad_entries = self.prepare_cached(n_samples);
-
-        self.fit_sne_run_loop(grad_entries)
+        self.run_loop(grad_entries, strategy, fit)
     }
 
     /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
@@ -1427,6 +1258,246 @@ where
         // Everything went smooth.
         Ok(self)
     }
+}
+
+/// Per-epoch repulsion strategy: produces the attractive and repulsive force rows
+/// for the current embedding and the reciprocal of the `Q` normalizer `Z`, and
+/// evaluates the matching KL divergence. The generic [`tSNE::run_loop`] owns one of
+/// these; the attractive force, the fused gradient-descent update, and the zero-mean
+/// recentering around it are identical across strategies, so only this trait differs
+/// between the Barnes-Hut and FIt-SNE paths.
+trait Repulsion<T, const D: usize> {
+    /// Fills the attractive (`positive`) and repulsive (`negative`) force rows for
+    /// the current embedding `y` and returns the reciprocal of the `Q` normalizer `Z`.
+    fn step(
+        &mut self,
+        y: &[T],
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        positive: &mut [T],
+        negative: &mut [T],
+    ) -> T;
+
+    /// Evaluates the KL divergence (the t-SNE loss) of the current embedding under
+    /// this strategy's repulsion approximation.
+    fn error(
+        &self,
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        y: &[T],
+        n_samples: usize,
+    ) -> T;
+}
+
+/// Barnes-Hut repulsion. A Morton arena summarizes the repulsive forces, computed in
+/// the same fused parallel pass as the attractive forces and the per-sample `Q`
+/// contributions, the latter reduced into `Z` afterwards.
+struct BarnesHutRepulsion<T, const D: usize> {
+    /// Morton arena, rebuilt over the embedding each epoch so its buffers persist.
+    arena: tsne::arena::Arena<T, D>,
+    /// Per-sample contribution to the `Q` normalizer, reduced after the force pass.
+    /// Sized to the sample count on the first epoch and reused thereafter.
+    q_sums: Vec<T>,
+    /// Approximation accuracy, retained for the KL-divergence evaluation.
+    theta: T,
+    /// `theta` squared, the form the cell-acceptance test compares against.
+    theta_sq: T,
+}
+
+impl<T, const D: usize> BarnesHutRepulsion<T, D>
+where
+    T: Float + Send + Sync + AddAssign,
+{
+    fn new(theta: T) -> Self {
+        Self {
+            arena: tsne::arena::Arena::empty(),
+            q_sums: Vec::new(),
+            theta,
+            theta_sq: theta * theta,
+        }
+    }
+}
+
+impl<T, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, D>
+where
+    T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
+    Dim<D>: Morton<D>,
+{
+    fn step(
+        &mut self,
+        y: &[T],
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        positive: &mut [T],
+        negative: &mut [T],
+    ) -> T {
+        let n_samples = y.len() / D;
+        // Rebuild the Morton arena over the current embedding.
+        self.arena.rebuild(y, n_samples);
+        debug_assert!(
+            self.arena.centers_of_mass_within_cells(),
+            "error: arena centre of mass escaped its cell."
+        );
+        self.q_sums.resize(n_samples, T::zero());
+
+        // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its
+        // `q_sum` term. The attractive pass reads coordinates directly, the repulsive pass walks
+        // the arena with a fixed-size stack. The stack lives in the `for_each_init` state, a
+        // stack-allocated array so the traversal never touches the heap: rayon calls the init
+        // once per work split, so a heap stack here would allocate per split and collapse the
+        // scaling at high thread counts.
+        let theta_sq = self.theta_sq;
+        let arena = &self.arena;
+        positive
+            .par_chunks_mut(D)
+            .zip(negative.par_chunks_mut(D))
+            .zip(self.q_sums.par_iter_mut())
+            .enumerate()
+            .for_each_init(
+                || {
+                    (
+                        [T::zero(); D],
+                        [T::zero(); D],
+                        [0u32; tsne::arena::STACK_CAP],
+                    )
+                },
+                |(edge_row, nonedge_row, stack),
+                 (index, ((positive_out, negative_out), q_sum_out))| {
+                    // Write each output row once to avoid false sharing.
+                    *edge_row = [T::zero(); D];
+                    *nonedge_row = [T::zero(); D];
+                    let mut q_sum = T::zero();
+                    tsne::arena::compute_edge_forces::<T, D>(
+                        index, y, p_rows, p_columns, p_values, edge_row,
+                    );
+                    arena.compute_non_edge_forces(
+                        index,
+                        theta_sq,
+                        y,
+                        nonedge_row,
+                        &mut q_sum,
+                        stack,
+                    );
+                    positive_out.copy_from_slice(&edge_row[..]);
+                    negative_out.copy_from_slice(&nonedge_row[..]);
+                    *q_sum_out = q_sum;
+                },
+            );
+
+        // Sequential q_sum: barrier-free and negligible against the forces. The reciprocal lets
+        // the fused update multiply instead of dividing per value.
+        let q_sum: T = self.q_sums.iter().copied().sum();
+        q_sum.recip()
+    }
+
+    fn error(
+        &self,
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        y: &[T],
+        n_samples: usize,
+    ) -> T {
+        tsne::evaluate_error_approximately::<T, D>(
+            p_rows, p_columns, p_values, y, n_samples, self.theta,
+        )
+    }
+}
+
+/// FIt-SNE repulsion. The attractive forces come from the sparse graph exactly as in
+/// the Barnes-Hut path, while the repulsive forces and the `Q` normalizer come from
+/// FFT-accelerated interpolation on an equal-spaced grid.
+struct InterpolatedRepulsion<T: FftNum, const D: usize> {
+    /// Interpolation workspace, grown in place as the embedding spreads.
+    interpolant: tsne::interpolation::Interpolant<T, D>,
+}
+
+impl<T, const D: usize> InterpolatedRepulsion<T, D>
+where
+    T: Send + Sync + Float + FftNum + AsPrimitive<usize> + Sum,
+{
+    fn new() -> Self {
+        Self {
+            interpolant: tsne::interpolation::Interpolant::new(),
+        }
+    }
+}
+
+impl<T, const D: usize> Repulsion<T, D> for InterpolatedRepulsion<T, D>
+where
+    T: Float
+        + FftNum
+        + Send
+        + Sync
+        + Sum
+        + AsPrimitive<usize>
+        + AddAssign
+        + SubAssign
+        + MulAssign
+        + DivAssign,
+{
+    fn step(
+        &mut self,
+        y: &[T],
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        positive: &mut [T],
+        negative: &mut [T],
+    ) -> T {
+        let n_samples = y.len() / D;
+        // Attractive (positive) forces from the sparse graph, parallel per sample.
+        // Identical to the Barnes-Hut edge forces, hence the shared routine.
+        positive
+            .par_chunks_mut(D)
+            .enumerate()
+            .for_each(|(index, row)| {
+                let row: &mut [T; D] = row.try_into().unwrap();
+                *row = [T::zero(); D];
+                tsne::arena::compute_edge_forces::<T, D>(
+                    index, y, p_rows, p_columns, p_values, row,
+                );
+            });
+
+        // Repulsive (negative) forces and the Q normalizer Z via FFT interpolation.
+        let mut z = T::zero();
+        self.interpolant
+            .repulsive_forces(y, n_samples, negative, &mut z);
+        z.recip()
+    }
+
+    fn error(
+        &self,
+        p_rows: &[usize],
+        p_columns: &[u32],
+        p_values: &[T],
+        y: &[T],
+        n_samples: usize,
+    ) -> T {
+        tsne::evaluate_error_interpolated::<T, D>(p_rows, p_columns, p_values, y, n_samples)
+    }
+}
+
+/// Copies sample `index`'s precomputed neighbor row (indices and distances) into the
+/// affinity-build buffers.
+#[inline]
+fn copy_neighbor_row<T: Copy>(
+    neighbors: &[Vec<Neighbor<T>>],
+    index: usize,
+    p_columns_row: &mut [u32],
+    distances_row: &mut [T],
+) {
+    p_columns_row
+        .iter_mut()
+        .zip(distances_row.iter_mut())
+        .zip(neighbors[index].iter())
+        .for_each(|((column, distance), neighbor)| {
+            *column = neighbor.index as u32;
+            *distance = neighbor.distance;
+        });
 }
 
 /// Loads data from a csv file.

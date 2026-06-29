@@ -23,6 +23,23 @@ use num_traits::{AsPrimitive, Float};
 
 use rustfft::FftNum;
 
+/// Adaptive-gain constants shared by the exact and approximate updates: the gain is
+/// bumped by `GAIN_INCREMENT` when the gradient and velocity disagree in sign,
+/// decayed by `GAIN_DECAY` when they agree, and floored at `MIN_GAIN`.
+const GAIN_INCREMENT: f64 = 0.2;
+const GAIN_DECAY: f64 = 0.8;
+const MIN_GAIN: f64 = 0.01;
+
+/// Per-epoch scalars for the fused [`gradient_descent_step`].
+pub(super) struct GradientStep<T> {
+    /// Learning rate.
+    pub learning_rate: T,
+    /// Momentum coefficient.
+    pub momentum: T,
+    /// Reciprocal of the `Q` normalization term `Z`.
+    pub inverse_norm: T,
+}
+
 /// Checks whether the perplexity is too large for the number of samples.
 ///
 /// # Arguments
@@ -34,6 +51,7 @@ use rustfft::FftNum;
 /// # Panics
 ///
 /// If the perplexity is too large.
+#[inline]
 pub(super) fn check_perplexity<T: Float + AsPrimitive<usize>>(perplexity: &T, n_samples: &usize) {
     if n_samples - 1 < 3 * perplexity.as_() {
         panic!("error: the provided perplexity is too large for the number of data points.\n");
@@ -397,9 +415,7 @@ pub(super) fn update_solution<T>(
 ) where
     T: Float + Send + Sync + AddAssign,
 {
-    let zero_point_two = T::from(0.2).unwrap();
-    let zero_point_eight = T::from(0.8).unwrap();
-    let zero_point_zero_one = T::from(0.01).unwrap();
+    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
 
     y.par_iter_mut()
         .zip(dy.par_iter())
@@ -407,12 +423,12 @@ pub(super) fn update_solution<T>(
         .zip(gains.par_iter_mut())
         .for_each(|(((y_el, dy_el), uy_el), gains_el)| {
             *gains_el = if dy_el.signum() != uy_el.signum() {
-                *gains_el + zero_point_two
+                *gains_el + gain_increment
             } else {
-                *gains_el * zero_point_eight
+                *gains_el * gain_decay
             };
-            if *gains_el < zero_point_zero_one {
-                *gains_el = zero_point_zero_one;
+            if *gains_el < min_gain {
+                *gains_el = min_gain;
             }
             *uy_el = *momentum * *uy_el - *learning_rate * *gains_el * *dy_el;
             *y_el += *uy_el
@@ -435,27 +451,23 @@ pub(super) fn update_solution<T>(
 ///
 /// * `gains` - per-coordinate adaptive gains.
 ///
-/// * `learning_rate` - learning rate.
-///
-/// * `momentum` - momentum coefficient.
-///
-/// * `inverse_norm` - reciprocal of the `Q` normalization term `Z`.
-#[allow(clippy::too_many_arguments)]
+/// * `step` - the per-epoch learning rate, momentum, and `1 / Z` scalars.
 pub(super) fn gradient_descent_step<T, const D: usize>(
     y: &mut [T],
     positive_forces: &[T],
     negative_forces: &[T],
     uy: &mut [T],
     gains: &mut [T],
-    learning_rate: T,
-    momentum: T,
-    inverse_norm: T,
+    step: GradientStep<T>,
 ) where
     T: Float + Send + Sync + AddAssign,
 {
-    let gain_increment = T::from(0.2).unwrap();
-    let gain_decay = T::from(0.8).unwrap();
-    let min_gain = T::from(0.01).unwrap();
+    let GradientStep {
+        learning_rate,
+        momentum,
+        inverse_norm,
+    } = step;
+    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
 
     y.par_chunks_mut(D)
         .with_min_len(crate::PARALLEL_CODE_THRESHOLD)
@@ -746,4 +758,14 @@ where
         });
 
     partials.par_iter().map(|partial| *partial).sum::<T>()
+}
+
+/// The three adaptive-gain constants converted to `T`, computed once per update pass.
+#[inline]
+fn gain_constants<T: Float>() -> (T, T, T) {
+    (
+        T::from(GAIN_INCREMENT).unwrap(),
+        T::from(GAIN_DECAY).unwrap(),
+        T::from(MIN_GAIN).unwrap(),
+    )
 }
