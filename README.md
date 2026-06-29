@@ -94,4 +94,6 @@ Being built on [rayon](https://github.com/rayon-rs/rayon), the algorithm uses th
 ## MNIST embedding
 The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) train set using PCA to reduce its dimensionality to 20. It took approximately **20 seconds** on a M5 MacBook Pro.
 
-![mnist](imgs/mnist_embedding.gif)
+<p align="center">
+  <img src="imgs/mnist_embedding.gif" alt="mnist" />
+</p>
