@@ -1,6 +1,3 @@
-//! Shared helpers for the benchmark binaries: deterministic, RNG-free sample
-//! generation and a brute-force nearest-neighbor reference. Both benches pull
-//! these in with `mod common;`.
 use std::{
     iter::Sum,
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
@@ -8,16 +5,26 @@ use std::{
 
 use num_traits::{AsPrimitive, Float};
 
-use bhtsne::Neighbor;
+use bhtsne::{FftNum, Neighbor};
 
 /// The scalar bound bundle the t-SNE solver requires, satisfied by both floats.
 pub trait Scalar:
-    Float + Send + Sync + AsPrimitive<usize> + Sum + DivAssign + AddAssign + MulAssign + SubAssign
+    Float
+    + FftNum
+    + Send
+    + Sync
+    + AsPrimitive<usize>
+    + Sum
+    + DivAssign
+    + AddAssign
+    + MulAssign
+    + SubAssign
 {
 }
 
 impl<T> Scalar for T where
     T: Float
+        + FftNum
         + Send
         + Sync
         + AsPrimitive<usize>
@@ -31,7 +38,7 @@ impl<T> Scalar for T where
 
 /// Casts an `f64` constant into the scalar in use.
 pub fn cast<T: Float>(x: f64) -> T {
-    T::from(x).unwrap()
+    T::from(x).expect("should convert to float")
 }
 
 /// Deterministic pseudo random samples, reproducible and RNG-free.
@@ -43,12 +50,16 @@ pub fn lcg<T: Scalar>(n: usize, dim: usize, mut state: u64) -> Vec<T> {
             .wrapping_add(1442695040888963407);
         data.push(cast((state >> 33) as f64 / u32::MAX as f64 - 0.5));
     }
+
     data
 }
 
 /// Squared euclidean distance between two samples.
-pub fn sq_euclidean<T: Scalar>(a: &[T], b: &[T]) -> T {
-    a.iter().zip(b.iter()).map(|(&x, &y)| (x - y).powi(2)).sum()
+pub fn sq_euclidean<T: Scalar>(x: &[T], y: &[T]) -> T {
+    x.iter()
+        .zip(y)
+        .map(|(xi, yi)| (*xi - *yi).powi(2))
+        .sum::<T>()
 }
 
 /// Euclidean distance between two samples.
@@ -65,10 +76,11 @@ pub fn brute_force_neighbors<T: Scalar>(samples: &[&[T]], k: usize) -> Vec<Vec<N
                 .filter(|&j| j != i)
                 .map(|j| (j, euclidean(samples[i], samples[j])))
                 .collect();
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            distances.truncate(k);
+            distances
+                .sort_by(|(_, a), (_, b)| a.partial_cmp(&b).expect("distance should not be NaN"));
             distances
                 .into_iter()
+                .take(k)
                 .map(|(index, distance)| Neighbor { index, distance })
                 .collect()
         })

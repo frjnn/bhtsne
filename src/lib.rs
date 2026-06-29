@@ -64,8 +64,12 @@ use std::{error::Error, fs::File};
 
 use num_traits::{Float, cast::AsPrimitive};
 
-#[doc(hidden)]
-pub use tsne::morton::{Dim, Morton};
+/// Public re-exports.
+pub use {
+    rustfft::FftNum,
+    tsne::interpolation::FftDim,
+    tsne::morton::{Dim, Morton},
+};
 
 use rayon::{
     iter::{
@@ -92,13 +96,8 @@ pub type EpochCallback<'data, T> = Box<dyn FnMut(usize, &[T]) + 'data>;
 enum Fit<T> {
     Exact,
     BarnesHut { theta: T },
+    Interpolated,
 }
-
-/// Used by the fused update.
-type UpdateRow<'a, T> = (
-    (((&'a mut [T], &'a [T]), &'a [T]), &'a mut [T]),
-    &'a mut [T],
-);
 
 /// A sample's nearest neighbor for [`tSNE::barnes_hut_with_neighbors`]: its index
 /// and the distance (not a similarity) to it.
@@ -422,6 +421,7 @@ where
     /// [`barnes_hut`]: tSNE::barnes_hut
     pub fn kl_divergence(&self) -> Option<T>
     where
+        T: FftNum,
         Dim<D>: Morton<D>,
     {
         let n_samples = self.data.len();
@@ -438,6 +438,13 @@ where
                 &self.y,
                 n_samples,
                 *theta,
+            )),
+            Fit::Interpolated => Some(tsne::evaluate_error_interpolated::<T, D>(
+                &self.p_rows,
+                &self.p_columns,
+                &self.p_values,
+                &self.y,
+                n_samples,
             )),
         }
     }
@@ -481,9 +488,10 @@ where
         // Zeroes the diagonal entries. The distances vector is recycled but the elements
         // corresponding to the diagonal entries of the distance matrix are always kept to 0. and
         // never written on. This hold as an invariant through all the algorithm.
-        for i in 0..n_samples {
-            distances[i * n_samples + i] = T::zero();
-        }
+        distances
+            .iter_mut()
+            .step_by(n_samples + 1)
+            .for_each(|d| *d = T::zero());
 
         // Compute pairwise distances in parallel with the user supplied function.
         // Only upper triangular entries, excluding the diagonal are computed: flat indexes are
@@ -619,6 +627,7 @@ where
         self.learning_rate.unwrap_or_else(|| {
             let auto =
                 T::from(n_samples).unwrap() / self.early_exaggeration / T::from(4.0).unwrap();
+
             auto.max(T::from(50.0).unwrap())
         })
     }
@@ -722,6 +731,38 @@ where
         Dim<D>: Morton<D>,
     {
         let n_samples = self.data.len();
+        let n_neighbors = self.check_neighbors(neighbors);
+
+        // If cached affinities encode the same neighbors, reuse them.
+        // Indices are provably valid from the run that produced the cache.
+        if self.cached_affinities_match_neighbors(neighbors) {
+            return self.run_cached_affinities(theta, n_samples);
+        }
+
+        // Cache miss: indices will be used, validate them.
+        self.assert_neighbor_indices_in_range(neighbors);
+
+        self.barnes_hut_fit(theta, n_neighbors, |index, p_columns_row, distances_row| {
+            p_columns_row
+                .iter_mut()
+                .zip(distances_row.iter_mut())
+                .zip(neighbors[index].iter())
+                .for_each(|((column, distance), neighbor)| {
+                    *column = neighbor.index as u32;
+                    *distance = neighbor.distance;
+                });
+        })
+    }
+
+    /// Validates the shape of a caller-supplied neighbor table and returns the
+    /// common per-sample neighbor count. Shared by the Barnes-Hut and FIt-SNE
+    /// `*_with_neighbors` entry points.
+    ///
+    /// # Panics
+    ///
+    /// If the rows are not one per sample, differ in length, or are empty.
+    fn check_neighbors(&self, neighbors: &[Vec<Neighbor<T>>]) -> usize {
+        let n_samples = self.data.len();
         assert_eq!(
             neighbors.len(),
             n_samples,
@@ -736,14 +777,17 @@ where
             n_neighbors > 0 && neighbors.iter().all(|row| row.len() == n_neighbors),
             "error: every neighbors row must have the same length, greater than zero."
         );
+        n_neighbors
+    }
 
-        // If cached affinities encode the same neighbors, reuse them.
-        // Indices are provably valid from the run that produced the cache.
-        if self.cached_affinities_match_neighbors(neighbors) {
-            return self.run_cached_affinities(theta, n_samples);
-        }
-
-        // Cache miss: indices will be used, validate them.
+    /// Asserts every neighbor index is a valid sample index. Only needed on a cache
+    /// miss, where the indices are actually dereferenced.
+    ///
+    /// # Panics
+    ///
+    /// If any neighbor index is `>= n_samples`.
+    fn assert_neighbor_indices_in_range(&self, neighbors: &[Vec<Neighbor<T>>]) {
+        let n_samples = self.data.len();
         assert!(
             neighbors
                 .iter()
@@ -751,8 +795,87 @@ where
                 .all(|neighbor| neighbor.index < n_samples),
             "error: a neighbor index is out of range, every index must be < n_samples = {n_samples}."
         );
+    }
 
-        self.barnes_hut_fit(theta, n_neighbors, |index, p_columns_row, distances_row| {
+    /// Performs a parallel FIt-SNE fit: the FFT-accelerated, interpolation-based
+    /// flavor of the algorithm (Linderman et al., 2019). Like [`barnes_hut`] it
+    /// builds the sparse affinity graph from a vantage point tree over `metric_f`,
+    /// but it approximates the repulsive forces with an `O(n)` interpolation on an
+    /// equal-spaced grid rather than a space-partitioning tree, which is typically
+    /// faster at large sample counts and carries no `theta` accuracy knob.
+    ///
+    /// Restricted to embedding dimensionalities `D in {1, 2}`, the range over which
+    /// the interpolation grid stays tractable (the `Dim<D>: FftDim` bound), with
+    /// `D = 2` the usual choice for visualization.
+    ///
+    /// # Arguments
+    ///
+    /// `metric_f` - metric function. As with [`barnes_hut`] it **must be a metric
+    /// distance**, i.e. it must satisfy the triangle inequality, since it feeds the
+    /// vantage point tree.
+    ///
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    pub fn fit_sne<F>(&mut self, metric_f: F) -> &mut Self
+    where
+        F: Fn(&U, &U) -> T + Send + Sync,
+        T: FftNum,
+        Dim<D>: FftDim,
+    {
+        // Perplexity is the only fit parameter to validate here: there is no theta.
+        tsne::check_perplexity(&self.perplexity, &self.data.len());
+
+        let n_samples = self.data.len();
+        if self.has_cached_affinities(n_samples) {
+            return self.run_cached_affinities_interpolated(n_samples);
+        }
+
+        // No cached affinities or mismatched dataset, rebuild.
+        let data = self.data;
+        // Number of points to consider when approximating the conditional distribution P.
+        let n_neighbors: usize = (T::from(3.0).unwrap() * self.perplexity).as_();
+        // Build the vantage point tree on the data set.
+        let tree = tsne::vptree::VPTree::new(data, &metric_f);
+
+        self.interpolated_fit(n_neighbors, move |index, p_columns_row, distances_row| {
+            tree.search(
+                &data[index],
+                index,
+                n_neighbors + 1,
+                p_columns_row,
+                distances_row,
+                &metric_f,
+            );
+        })
+    }
+
+    /// Like [`fit_sne`], but uses caller-supplied nearest neighbors instead of a
+    /// vantage point tree, doing no metric evaluations. The `neighbors` table has the
+    /// same shape and guarantees as in [`barnes_hut_with_neighbors`].
+    ///
+    /// # Panics
+    ///
+    /// If the rows are not one per sample, differ in length, are empty, or hold an
+    /// out-of-range index.
+    ///
+    /// [`fit_sne`]: tSNE::fit_sne
+    /// [`barnes_hut_with_neighbors`]: tSNE::barnes_hut_with_neighbors
+    pub fn fit_sne_with_neighbors(&mut self, neighbors: &[Vec<Neighbor<T>>]) -> &mut Self
+    where
+        T: FftNum,
+        Dim<D>: FftDim,
+    {
+        let n_samples = self.data.len();
+        let n_neighbors = self.check_neighbors(neighbors);
+
+        // If cached affinities encode the same neighbors, reuse them.
+        if self.cached_affinities_match_neighbors(neighbors) {
+            return self.run_cached_affinities_interpolated(n_samples);
+        }
+
+        // Cache miss: indices will be used, validate them.
+        self.assert_neighbor_indices_in_range(neighbors);
+
+        self.interpolated_fit(n_neighbors, |index, p_columns_row, distances_row| {
             p_columns_row
                 .iter_mut()
                 .zip(distances_row.iter_mut())
@@ -762,6 +885,102 @@ where
                     *distance = neighbor.distance;
                 });
         })
+    }
+
+    /// Builds the affinity graph through `fill_neighbors`, normalizes and seeds, then
+    /// runs the FIt-SNE optimization loop. The interpolation counterpart of
+    /// [`barnes_hut_fit`].
+    ///
+    /// [`barnes_hut_fit`]: tSNE::barnes_hut_fit
+    fn interpolated_fit<F>(&mut self, n_neighbors: usize, fill_neighbors: F) -> &mut Self
+    where
+        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
+        T: FftNum,
+        Dim<D>: FftDim,
+    {
+        let grad_entries = self.build_affinities(n_neighbors, fill_neighbors);
+        // Normalize P, disable the early exaggeration if requested, and seed the embedding.
+        self.finalize_p_and_seed(grad_entries);
+        self.fit_sne_run_loop(grad_entries)
+    }
+
+    /// Runs the FIt-SNE epoch loop. Called after the affinity graph is built,
+    /// normalized, and the embedding seeded.
+    ///
+    /// Each epoch computes the attractive forces from the sparse graph exactly as the
+    /// Barnes-Hut loop does, draws the repulsive forces and the `Q` normalizer from
+    /// the FFT interpolation, and feeds both into the shared
+    /// [`gradient_descent_step`]. The attractive force, the fused update, and the
+    /// zero-mean recentering are therefore identical to the Barnes-Hut path; only the
+    /// repulsion strategy differs.
+    ///
+    /// [`gradient_descent_step`]: tsne::gradient_descent_step
+    fn fit_sne_run_loop(&mut self, grad_entries: usize) -> &mut Self
+    where
+        T: FftNum,
+        Dim<D>: FftDim,
+    {
+        let n_samples = self.data.len();
+        // Attractive and repulsive force buffers, reused across epochs.
+        let mut positive_forces: Vec<T> = vec![T::zero(); grad_entries];
+        let mut negative_forces: Vec<T> = vec![T::zero(); grad_entries];
+
+        // Interpolation workspace, grown in place as the embedding spreads.
+        let mut interpolant = tsne::interpolation::Interpolant::<T, D>::new();
+
+        // The callback is detached from self for the fit so the epoch loop is free
+        // to borrow the other fields mutably; it is put back once the loop ends.
+        let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
+
+        for epoch in 0..self.epochs {
+            // Attractive (positive) forces from the sparse graph, parallel per sample.
+            // Identical to the Barnes-Hut edge forces, hence the shared routine.
+            positive_forces
+                .par_chunks_mut(D)
+                .enumerate()
+                .for_each(|(index, row)| {
+                    let row: &mut [T; D] = row.try_into().unwrap();
+                    *row = [T::zero(); D];
+                    tsne::arena::compute_edge_forces::<T, D>(
+                        index,
+                        &self.y,
+                        &self.p_rows,
+                        &self.p_columns,
+                        &self.p_values,
+                        row,
+                    );
+                });
+
+            // Repulsive (negative) forces and the Q normalizer Z via FFT interpolation.
+            let mut z = T::zero();
+            interpolant.repulsive_forces(&self.y, n_samples, &mut negative_forces, &mut z);
+            let inverse_z = z.recip();
+
+            // Fuse the gradient (`positive - negative * inverse_z`) into the update.
+            let learning_rate = self.resolve_learning_rate(n_samples);
+            tsne::gradient_descent_step::<T, D>(
+                &mut self.y,
+                &positive_forces,
+                &negative_forces,
+                &mut self.uy,
+                &mut self.gains,
+                learning_rate,
+                self.momentum,
+                inverse_z,
+            );
+
+            // Make the solution zero mean.
+            tsne::zero_mean::<T, D>(&mut self.y, n_samples);
+
+            self.epoch_tail(epoch, &mut epoch_callback, &mut snapshot);
+        }
+        // Puts the callback back in place.
+        self.epoch_callback = epoch_callback;
+        // Clears buffers used for fitting.
+        tsne::clear_buffers(&mut self.dy, &mut self.uy, &mut self.gains);
+        self.fit = Some(Fit::Interpolated);
+
+        self
     }
 
     /// Returns the affinity graph from the last `barnes_hut` fit in pristine
@@ -779,6 +998,7 @@ where
             let scale = self.early_exaggeration.recip();
             self.p_values.iter().map(|v| *v * scale).collect()
         };
+
         Some(SparseAffinities {
             rows: self.p_rows.clone(),
             columns: self.p_columns.clone(),
@@ -797,6 +1017,7 @@ where
         self.p_columns = affinities.columns;
         self.p_values = affinities.values;
         self.cached_perplexity = Some(self.perplexity);
+
         self
     }
     /// writes sample `index`'s neighbor indices and distances; the rest is common.
@@ -807,14 +1028,31 @@ where
     {
         // Idempotent: `barnes_hut` already validated before building its tree.
         self.validate_fit_params(theta);
+        let grad_entries = self.build_affinities(n_neighbors, fill_neighbors);
 
+        // Normalize P, seed the embedding, then run the optimization loop.
+        self.barnes_hut_optimize(theta, grad_entries)
+    }
+
+    /// Builds the sparse, symmetric affinity graph `P` shared by every approximate
+    /// fitting strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `n_neighbors` - number of nearest neighbors per sample.
+    ///
+    /// * `fill_neighbors` - writes sample `index`'s neighbor indices and distances.
+    fn build_affinities<F>(&mut self, n_neighbors: usize, fill_neighbors: F) -> usize
+    where
+        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
+    {
         let n_samples = self.data.len(); // Number of samples in data.
         // Number of entries in gradient and gains matrices.
         let grad_entries = n_samples * D;
         // Number of entries in pairwise measures matrices.
         let pairwise_entries = n_samples * n_neighbors;
 
-        // Prepare buffers. The Barnes-Hut update fuses the gradient into the gradient-descent step,
+        // Prepare buffers. The approximate update fuses the gradient into the gradient-descent step,
         // so unlike `exact` it never materializes a gradient buffer: allocate only the embedding,
         // momentum buffer, and gains, leaving `dy` empty.
         self.y.resize(grad_entries, T::zero());
@@ -866,8 +1104,7 @@ where
         // Record the perplexity used so a later change invalidates the cache.
         self.cached_perplexity = Some(self.perplexity);
 
-        // Normalize P, seed the embedding, then run the optimization loop.
-        self.barnes_hut_optimize(theta, grad_entries)
+        grad_entries
     }
 
     /// Runs the Barnes-Hut optimization loop. Normalizes P (applying
@@ -974,39 +1211,16 @@ where
             // Fuse the gradient (`positive - negative * inverse_q_sum`) into the gradient-descent
             // update, so it needs no separate buffer or sweep.
             let learning_rate = self.resolve_learning_rate(n_samples);
-            let momentum = self.momentum;
-            let gain_increment = T::from(0.2).unwrap();
-            let gain_decay = T::from(0.8).unwrap();
-            let min_gain = T::from(0.01).unwrap();
-            self.y
-                .par_chunks_mut(D)
-                .with_min_len(PARALLEL_CODE_THRESHOLD)
-                .zip(positive_forces.par_chunks(D))
-                .zip(negative_forces.par_chunks(D))
-                .zip(self.uy.par_chunks_mut(D))
-                .zip(self.gains.par_chunks_mut(D))
-                .for_each(|row: UpdateRow<'_, T>| {
-                    let ((((y_sample, positive), negative), uy_sample), gains_sample) = row;
-                    y_sample
-                        .iter_mut()
-                        .zip(positive.iter())
-                        .zip(negative.iter())
-                        .zip(uy_sample.iter_mut())
-                        .zip(gains_sample.iter_mut())
-                        .for_each(|((((y_el, pf), nf), uy_el), gain)| {
-                            let gradient = *pf - *nf * inverse_q_sum;
-                            *gain = if gradient.signum() != uy_el.signum() {
-                                *gain + gain_increment
-                            } else {
-                                *gain * gain_decay
-                            };
-                            if *gain < min_gain {
-                                *gain = min_gain;
-                            }
-                            *uy_el = momentum * *uy_el - learning_rate * *gain * gradient;
-                            *y_el += *uy_el;
-                        });
-                });
+            tsne::gradient_descent_step::<T, D>(
+                &mut self.y,
+                &positive_forces,
+                &negative_forces,
+                &mut self.uy,
+                &mut self.gains,
+                learning_rate,
+                self.momentum,
+                inverse_q_sum,
+            );
 
             // Recenter (zero mean). The per-dimension sums accumulate sequentially (barrier-free),
             // so only the subtraction is a parallel pass.
@@ -1132,18 +1346,41 @@ where
         })
     }
 
-    /// Runs the cached-affinities optimization path.
-    fn run_cached_affinities(&mut self, theta: T, n_samples: usize) -> &mut Self
-    where
-        Dim<D>: Morton<D>,
-    {
+    /// Prepares the optimization buffers and seeds the embedding when reusing a
+    /// cached affinity graph, returning the embedding length `n_samples * D`.
+    ///
+    /// Shared by the Barnes-Hut and FIt-SNE cached paths, which differ only in the loop that
+    /// follows.
+    fn prepare_cached(&mut self, n_samples: usize) -> usize {
         self.stop_lying_fired = false;
         let grad_entries = n_samples * D;
         self.y.resize(grad_entries, T::zero());
         self.uy.resize(grad_entries, T::zero());
         self.gains.resize(grad_entries, T::one());
         self.finalize_p_and_seed(grad_entries);
+
+        grad_entries
+    }
+
+    /// Runs the Barnes-Hut cached-affinities optimization path.
+    fn run_cached_affinities(&mut self, theta: T, n_samples: usize) -> &mut Self
+    where
+        Dim<D>: Morton<D>,
+    {
+        let grad_entries = self.prepare_cached(n_samples);
+
         self.barnes_hut_run_loop(theta, grad_entries)
+    }
+
+    /// Runs the FIt-SNE cached-affinities optimization path.
+    fn run_cached_affinities_interpolated(&mut self, n_samples: usize) -> &mut Self
+    where
+        T: FftNum,
+        Dim<D>: FftDim,
+    {
+        let grad_entries = self.prepare_cached(n_samples);
+
+        self.fit_sne_run_loop(grad_entries)
     }
 
     /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
