@@ -602,8 +602,8 @@ where
                 &self.momentum,
             );
 
-            // Zeroes the gradient.
-            self.dy.iter_mut().for_each(|el| *el = T::zero());
+            // Zeroes the gradient (memset rather than a serial element-wise loop).
+            self.dy.fill(T::zero());
 
             // Make solution zero mean.
             tsne::zero_mean::<T, D>(&mut self.y, n_samples);
@@ -622,6 +622,7 @@ where
     /// Resolves the learning rate: the explicit value if set, otherwise the
     /// size-scaled `max(n_samples / early_exaggeration / 4, 50)` default, as used
     /// by scikit-learn and openTSNE.
+    #[inline]
     fn resolve_learning_rate(&self, n_samples: usize) -> T {
         self.learning_rate.unwrap_or_else(|| {
             let auto =
@@ -943,6 +944,9 @@ where
         // to borrow the other fields mutably; it is put back once the loop ends.
         let (mut epoch_callback, mut snapshot) = self.take_callback_and_snapshot(grad_entries);
 
+        // Loop-invariant.
+        let learning_rate = self.resolve_learning_rate(n_samples);
+
         for epoch in 0..self.epochs {
             // Forces and the reciprocal of the Q normalizer Z from the repulsion strategy.
             let inverse_norm = strategy.step(
@@ -955,7 +959,6 @@ where
             );
 
             // Fuse the gradient (`positive - negative * inverse_norm`) into the update.
-            let learning_rate = self.resolve_learning_rate(n_samples);
             tsne::gradient_descent_step::<T, D>(
                 &mut self.y,
                 &positive_forces,

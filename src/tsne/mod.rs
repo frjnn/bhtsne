@@ -594,26 +594,24 @@ where
         n_samples,
     );
 
-    let mut q_values: Vec<T> = vec![T::zero(); n_samples * n_samples];
-    q_values
-        .par_iter_mut()
-        .zip(distances.par_iter())
-        .for_each(|(q, d)| *q = (T::one() + *d).recip());
+    // Q's normalizer Z is the sum of the unnormalized Student-t affinities `1 / (1 + d)`.
+    // Fold it straight out of the distance matrix so the full n^2 q_values buffer never
+    // has to be materialized.
+    let inverse_q_sum = distances
+        .par_iter()
+        .map(|d| (T::one() + *d).recip())
+        .sum::<T>()
+        .recip();
 
-    let q_sum = q_values.par_iter().map(|q| *q).sum::<T>();
-    let inverse_q_sum = q_sum.recip();
-    q_values
-        .par_iter_mut()
-        .for_each(|q| *q = *q * inverse_q_sum);
-
-    // Kullback-Leibler divergence.
+    // Kullback-Leibler divergence, reconstructing each normalized q on the fly.
     p_values
         .par_iter()
-        .zip(q_values.par_iter())
+        .zip(distances.par_iter())
         .fold(
             || T::zero(),
-            |c, (p, q)| {
-                c + *p * ((*p + T::min_positive_value()) / (*q + T::min_positive_value())).ln()
+            |c, (p, d)| {
+                let q = (T::one() + *d).recip() * inverse_q_sum;
+                c + *p * ((*p + T::min_positive_value()) / (q + T::min_positive_value())).ln()
             },
         )
         .sum::<T>()
