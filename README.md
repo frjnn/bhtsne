@@ -92,7 +92,6 @@ bhtsne::tSNE::<f32, &[f32], 2>::new(&samples)
 Being built on [rayon](https://github.com/rayon-rs/rayon), the algorithm uses the same number of threads as the number of CPUs available. Do note that on systems with hyperthreading enabled this equals the number of logical cores and not the physical ones. See [rayon's FAQs](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for additional informations.
 
 ## MNIST embedding
-The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) train set using PCA to reduce its 
-dimensionality to 50. It took approximately **3 minutes and 6 seconds** on a 2.0GHz quad-core 10th-generation i5 MacBook Pro. 
+The following embedding has been obtained by preprocessing the [MNIST](https://git-disl.github.io/GTDLBench/datasets/mnist_datasets/) train set using PCA to reduce its dimensionality to 20. It took approximately **20 seconds** on a M5 MacBook Pro.
 
-![mnist](imgs/mnist_embedding.gif) 
+![mnist](imgs/mnist_embedding.gif)
