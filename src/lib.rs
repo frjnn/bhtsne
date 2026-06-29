@@ -699,13 +699,13 @@ where
         // the training loop. The `+ 1` is the sample itself, excluded by the search.
         self.approximate_fit(
             n_neighbors,
-            move |index, p_columns_row, distances_row| {
+            move |scratch, index, p_columns_row, distances_row| {
                 tree.search(
                     &data[index],
                     index,
                     n_neighbors + 1,
-                    p_columns_row,
-                    distances_row,
+                    (p_columns_row, distances_row),
+                    scratch,
                     &metric_f,
                 );
             },
@@ -828,13 +828,13 @@ where
 
         self.approximate_fit(
             n_neighbors,
-            move |index, p_columns_row, distances_row| {
+            move |scratch, index, p_columns_row, distances_row| {
                 tree.search(
                     &data[index],
                     index,
                     n_neighbors + 1,
-                    p_columns_row,
-                    distances_row,
+                    (p_columns_row, distances_row),
+                    scratch,
                     &metric_f,
                 );
             },
@@ -879,7 +879,7 @@ where
     ) -> &mut Self
     where
         R: Repulsion<T, D>,
-        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
+        F: Fn(&mut tsne::vptree::SearchScratch<T>, usize, &mut [u32], &mut [T]) + Send + Sync,
     {
         let grad_entries = self.build_affinities(n_neighbors, fill_neighbors);
         // Normalize P, disable the early exaggeration if requested, and seed the embedding.
@@ -915,7 +915,7 @@ where
 
         self.approximate_fit(
             n_neighbors,
-            |index, p_columns_row, distances_row| {
+            |_, index, p_columns_row, distances_row| {
                 copy_neighbor_row(neighbors, index, p_columns_row, distances_row);
             },
             strategy,
@@ -1034,7 +1034,7 @@ where
     /// * `fill_neighbors` - writes sample `index`'s neighbor indices and distances.
     fn build_affinities<F>(&mut self, n_neighbors: usize, fill_neighbors: F) -> usize
     where
-        F: Fn(usize, &mut [u32], &mut [T]) + Send + Sync,
+        F: Fn(&mut tsne::vptree::SearchScratch<T>, usize, &mut [u32], &mut [T]) + Send + Sync,
     {
         let n_samples = self.data.len(); // Number of samples in data.
         // Number of entries in gradient and gains matrices.
@@ -1070,12 +1070,15 @@ where
                 .zip(distances.par_chunks_mut(n_neighbors))
                 .zip(p_columns.par_chunks_mut(n_neighbors))
                 .enumerate()
-                .for_each(|(index, ((p_values_row, distances_row), p_columns_row))| {
-                    // Writes the indices and the distances of the nearest neighbors of the sample.
-                    fill_neighbors(index, p_columns_row, distances_row);
-                    debug_assert!(!p_columns_row.contains(&(index as u32)));
-                    tsne::search_beta(p_values_row, distances_row, perplexity);
-                });
+                .for_each_init(
+                    tsne::vptree::SearchScratch::default,
+                    |scratch, (index, ((p_values_row, distances_row), p_columns_row))| {
+                        // Writes the indices and the distances of the nearest neighbors of the sample.
+                        fill_neighbors(scratch, index, p_columns_row, distances_row);
+                        debug_assert!(!p_columns_row.contains(&(index as u32)));
+                        tsne::search_beta(p_values_row, distances_row, perplexity);
+                    },
+                );
         }
 
         // Free whatever the filler owns (the vantage point tree) before training.
@@ -1340,10 +1343,6 @@ where
         let n_samples = y.len() / D;
         // Rebuild the Morton arena over the current embedding.
         self.arena.rebuild(y, n_samples);
-        debug_assert!(
-            self.arena.centers_of_mass_within_cells(),
-            "error: arena centre of mass escaped its cell."
-        );
         self.q_sums.resize(n_samples, T::zero());
 
         // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its

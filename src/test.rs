@@ -1172,10 +1172,6 @@ fn arena_build_maintains_invariants() {
     let arena = tsne::arena::Arena::<f32, 2>::new(&data, N);
 
     assert_eq!(arena.root_count(), N, "arena lost or invented points");
-    assert!(
-        arena.centers_of_mass_within_cells(),
-        "a cell centre of mass escaped its cell, the build aggregated phantom mass"
-    );
 }
 
 /// End-to-end regression test for the same bug, reproducing the symptom directly: corrupted

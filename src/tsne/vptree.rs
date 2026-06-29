@@ -44,6 +44,26 @@ struct HeapItem<T: Float> {
     distance: T,
 }
 
+/// Reusable per-search scratch.
+pub(crate) struct SearchScratch<T: Float> {
+    /// Bounded max-heap of the current k best candidates, ordered by distance.
+    heap: BinaryHeap<HeapItem<T>>,
+    /// Explicit traversal stack standing in for recursion in [`VPTree::look_up`].
+    stack: Vec<u32>,
+    /// The heap drained into ascending order, read back into the caller's output rows.
+    results: Vec<HeapItem<T>>,
+}
+
+impl<T: Float> Default for SearchScratch<T> {
+    fn default() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            stack: Vec::new(),
+            results: Vec::new(),
+        }
+    }
+}
+
 impl<T: Float> PartialOrd for HeapItem<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -176,6 +196,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         target: &U,
         k: usize,
         heap: &mut BinaryHeap<HeapItem<T>>,
+        stack: &mut Vec<u32>,
         metric_f: F,
     ) where
         F: Fn(&U, &U) -> T,
@@ -183,7 +204,9 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         if self.nodes.is_empty() {
             return;
         }
-        let mut stack: Vec<u32> = vec![0];
+        // Reused across searches: start each traversal from the root.
+        stack.clear();
+        stack.push(0);
 
         while let Some(node_index) = stack.pop() {
             let node = &self.nodes[node_index as usize];
@@ -244,9 +267,8 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
     ///
     /// * `k` - number of nearest neighbors.
     ///
-    /// * `neighbors_indices` - vector in which the index of the nearest neighbors will be saved.
-    ///
-    /// * `distances` - vector storing relative distances of the nearest neighbors.
+    /// * `out` - the paired output rows the result is written into: the nearest neighbor indices and
+    ///   their distances, in ascending distance order.
     ///
     /// * `metric_f` - metric function.
     pub fn search<F>(
@@ -254,33 +276,45 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         target: &U,
         target_index: usize,
         k: usize,
-        neighbors_indices: &mut [u32],
-        distances: &mut [T],
+        out: (&mut [u32], &mut [T]),
+        scratch: &mut SearchScratch<T>,
         metric_f: F,
     ) where
         F: Fn(&U, &U) -> T,
     {
+        let (neighbors_indices, distances) = out;
         debug_assert_eq!(neighbors_indices.len(), distances.len());
 
-        // Use a priority queue to store intermediate results on.
-        let mut heap: BinaryHeap<HeapItem<T>> = BinaryHeap::with_capacity(k);
+        // Reuse the per-worker priority queue to store intermediate results on.
+        scratch.heap.clear();
         // Perform the search.
-        self.look_up(&mut T::max_value(), target, k, &mut heap, metric_f);
-        // Gather final results.
-        let results = heap.into_sorted_vec();
+        self.look_up(
+            &mut T::max_value(),
+            target,
+            k,
+            &mut scratch.heap,
+            &mut scratch.stack,
+            metric_f,
+        );
+        scratch.results.clear();
+        while let Some(item) = scratch.heap.pop() {
+            scratch.results.push(item);
+        }
 
         // Avoid the target itself.
         neighbors_indices
             .iter_mut()
             .zip(distances.iter_mut())
-            .zip(results.iter().filter(|result| {
-                let HeapItem { index, distance: _ } = result;
-                target_index != *index
-            }))
+            .zip(
+                scratch
+                    .results
+                    .iter()
+                    .rev()
+                    .filter(|result| target_index != result.index),
+            )
             .for_each(|((idx, d), result)| {
-                let HeapItem { index, distance } = result;
-                *idx = *index as u32;
-                *d = *distance;
+                *idx = result.index as u32;
+                *d = result.distance;
             });
     }
 }
