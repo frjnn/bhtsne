@@ -1,5 +1,8 @@
-use super::{Neighbor, tSNE, tsne};
+use std::collections::HashSet;
+
 use rand::Rng;
+
+use super::{Neighbor, tSNE, tsne};
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
@@ -1010,7 +1013,7 @@ fn bounding_box_diagonal(points: &[f32], dim: usize) -> f32 {
 
 /// Regression test for the Gaussian bandwidth binary search.
 ///
-/// When the neighbour distances are heterogeneous and noticeably larger than
+/// When the neighbor distances are heterogeneous and noticeably larger than
 /// 1, matching the target perplexity requires a bandwidth beta well below 1.
 /// The descent path of the search (taken while no lower bracket is known yet)
 /// must therefore be able to shrink beta indefinitely. Releases 0.5.0-0.5.2
@@ -1087,7 +1090,7 @@ fn barnes_hut_separates_clusters_at_large_input_scale() {
         });
     let embedding = tsne.embedding();
 
-    // For every point, the nearest embedded neighbour must belong to the
+    // For every point, the nearest embedded neighbor must belong to the
     // same cluster for at least 95% of the points.
     let n = 2 * N_PER_CLUSTER;
     let mut same_cluster = 0;
@@ -1112,7 +1115,7 @@ fn barnes_hut_separates_clusters_at_large_input_scale() {
     }
     assert!(
         same_cluster as f64 / n as f64 > 0.95,
-        "clusters not separated: only {same_cluster}/{n} points have a same-cluster nearest neighbour"
+        "clusters not separated: only {same_cluster}/{n} points have a same-cluster nearest neighbor"
     );
 }
 
@@ -1180,8 +1183,6 @@ fn arena_build_maintains_invariants() {
 /// healthy run spreads the points out, so most embedded positions are distinct.
 #[test]
 fn barnes_hut_does_not_collapse_embedding() {
-    use std::collections::HashSet;
-
     const N: usize = 500;
     const DIM: usize = 8;
     let data = lcg_samples(N, DIM, 23);
@@ -1701,4 +1702,201 @@ fn with_affinities_adopts_perplexity_from_affinities() {
     tsne2.perplexity(5.0);
     tsne2.with_affinities(affinities);
     assert_eq!(tsne2.perplexity, 30.0);
+}
+
+/// The FIt-SNE (interpolation) path reports a finite, non-negative KL divergence,
+/// the same contract the exact and Barnes-Hut paths satisfy.
+#[test]
+fn kl_divergence_after_fit_sne_is_finite_and_nonnegative() {
+    const N: usize = 200;
+    let data = lcg_samples(N, D, 11);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(250)
+        .fit_sne(|a, b| euclidean(a, b));
+
+    let kl = tsne.kl_divergence().expect("fitted");
+    assert!(kl.is_finite() && kl >= 0.0, "kl divergence was {kl}");
+}
+
+/// End-to-end quality: the FIt-SNE path must separate two trivially separable
+/// clusters, the same regression the Barnes-Hut path is held to. A correct t-SNE
+/// is invariant to uniform input rescaling, so the clusters separate at large
+/// input scale just as at small.
+#[test]
+fn fit_sne_separates_clusters() {
+    const N_PER_CLUSTER: usize = 250;
+    const DIM: usize = 10;
+
+    let mut state = 1234_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as f32 / u32::MAX as f32) - 0.5
+    };
+
+    let mut data = Vec::with_capacity(2 * N_PER_CLUSTER * DIM);
+    for cluster in 0..2 {
+        let centre = if cluster == 0 { 0.0 } else { 30.0 };
+        for _ in 0..N_PER_CLUSTER {
+            for _ in 0..DIM {
+                data.push(centre + 6.0 * next());
+            }
+        }
+    }
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(30.0)
+        .epochs(500)
+        .fit_sne(|a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+
+    // For every point, the nearest embedded neighbor must belong to the same
+    // cluster for at least 95% of the points.
+    let n = 2 * N_PER_CLUSTER;
+    let mut same_cluster = 0;
+    for i in 0..n {
+        let mut best = f32::MAX;
+        let mut best_j = usize::MAX;
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let dx = embedding[2 * i] - embedding[2 * j];
+            let dy = embedding[2 * i + 1] - embedding[2 * j + 1];
+            let d = dx * dx + dy * dy;
+            if d < best {
+                best = d;
+                best_j = j;
+            }
+        }
+        if (i < N_PER_CLUSTER) == (best_j < N_PER_CLUSTER) {
+            same_cluster += 1;
+        }
+    }
+    assert!(
+        same_cluster as f64 / n as f64 > 0.95,
+        "clusters not separated: only {same_cluster}/{n} points have a same-cluster nearest neighbor"
+    );
+}
+
+/// The FIt-SNE path must not collapse the embedding onto a handful of points; a
+/// healthy run spreads them out.
+#[test]
+fn fit_sne_does_not_collapse_embedding() {
+    const N: usize = 400;
+    const DIM: usize = 8;
+    let data = lcg_samples(N, DIM, 23);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(30.0)
+        .epochs(500)
+        .fit_sne(|a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+
+    assert!(
+        embedding.iter().all(|v| v.is_finite()),
+        "embedding contains non-finite values"
+    );
+    let distinct: HashSet<(i64, i64)> = embedding
+        .chunks_exact(2)
+        .map(|point| {
+            (
+                (point[0] * 100.0).round() as i64,
+                (point[1] * 100.0).round() as i64,
+            )
+        })
+        .collect();
+    assert!(
+        distinct.len() > N / 2,
+        "embedding collapsed: only {} distinct positions for {N} points",
+        distinct.len()
+    );
+}
+
+/// `fit_sne_with_neighbors` reproduces the `fit_sne` embedding when fed the very
+/// neighbors the tree would find. Reductions are not bit-reproducible across thread
+/// schedules, so the two paths are compared on a single-thread pool.
+#[test]
+fn fit_sne_with_neighbors_matches_vptree_path() {
+    const N: usize = 120;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+    let seed = lcg_samples(N, NO_DIMS as usize, 99);
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let neighbors = brute_force_neighbors(&samples, n_neighbors);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let (reference, candidate) = pool.install(|| {
+        let reference = {
+            let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+            tsne.perplexity(PERPLEXITY)
+                .epochs(100)
+                .initial_embedding(&seed[..])
+                .fit_sne(|a, b| euclidean(a, b));
+            tsne.embedding()
+        };
+        let candidate = {
+            let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+            tsne.perplexity(PERPLEXITY)
+                .epochs(100)
+                .initial_embedding(&seed[..])
+                .fit_sne_with_neighbors(&neighbors);
+            tsne.embedding()
+        };
+        (reference, candidate)
+    });
+
+    assert_eq!(candidate, reference);
+}
+
+/// Ragged neighbor rows must be rejected by the FIt-SNE entry point too.
+#[test]
+#[should_panic(expected = "same length")]
+fn fit_sne_with_neighbors_rejects_ragged_rows() {
+    const N: usize = 80;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let mut neighbors = brute_force_neighbors(&samples, n_neighbors);
+    neighbors[0].pop();
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(1)
+        .fit_sne_with_neighbors(&neighbors);
+}
+
+/// An out-of-range neighbor index must be rejected up front by the FIt-SNE path.
+#[test]
+#[should_panic(expected = "out of range")]
+fn fit_sne_with_neighbors_rejects_out_of_range_index() {
+    const N: usize = 80;
+    const DIM: usize = 4;
+
+    let data = lcg_samples(N, DIM, 11);
+    let samples: Vec<&[f32]> = data.chunks(DIM).collect();
+
+    let n_neighbors = (3.0 * PERPLEXITY) as usize;
+    let mut neighbors = brute_force_neighbors(&samples, n_neighbors);
+    neighbors[0][0].index = N;
+
+    let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(1)
+        .fit_sne_with_neighbors(&neighbors);
 }

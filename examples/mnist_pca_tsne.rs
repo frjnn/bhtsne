@@ -5,13 +5,15 @@
 //!
 //! Produces a CSV embedding and a PNG scatter plot colored by digit.
 
-use std::error::Error;
-use std::time::Instant;
+use std::{error::Error, time::Instant};
+
+use chrono::Utc;
+
+use npyz::npz::NpzArchive;
+
+use plotters::prelude::*;
 
 use bhtsne::tSNE;
-use chrono::Utc;
-use npyz::npz::NpzArchive;
-use plotters::prelude::*;
 
 const PCA_DIMS: usize = 20;
 const PERPLEXITY: f64 = 30.0;
@@ -60,6 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .zip(b.iter())
                 .map(|(x, y)| {
                     let d = (*x as f64) - (*y as f64);
+
                     d * d
                 })
                 .sum::<f64>()

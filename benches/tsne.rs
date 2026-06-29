@@ -42,7 +42,7 @@ fn bench_exact<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: &str)
 
 fn bench_barnes_hut<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: &str) {
     let k = (3.0 * PERPLEXITY) as usize;
-    for &n in &[1000usize, 2000] {
+    for &n in &[1000, 2000] {
         let data: Vec<T> = lcg(n, INPUT_DIM, 0x00C0_FFEE);
         let samples: Vec<&[T]> = data.chunks(INPUT_DIM).collect();
         let neighbors = brute_force_neighbors(&samples, k);
@@ -55,6 +55,28 @@ fn bench_barnes_hut<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: 
                     tsne.perplexity(cast(PERPLEXITY))
                         .epochs(e)
                         .barnes_hut_with_neighbors(cast(THETA), black_box(&neighbors));
+                    black_box(tsne.embedding());
+                });
+            });
+        }
+    }
+}
+
+fn bench_fit_sne<T: Scalar>(group: &mut BenchmarkGroup<'_, WallTime>, dtype: &str) {
+    let k = (3.0 * PERPLEXITY) as usize;
+    for &n in &[1000, 2000] {
+        let data: Vec<T> = lcg(n, INPUT_DIM, 0x00C0_FFEE);
+        let samples: Vec<&[T]> = data.chunks(INPUT_DIM).collect();
+        let neighbors = brute_force_neighbors(&samples, k);
+
+        for &epochs in &[0usize, EPOCHS] {
+            let id = BenchmarkId::new(format!("{dtype}/n{n}"), epochs);
+            group.bench_with_input(id, &epochs, |b, &e| {
+                b.iter(|| {
+                    let mut tsne: tSNE<T, &[T]> = tSNE::new(&samples);
+                    tsne.perplexity(cast(PERPLEXITY))
+                        .epochs(e)
+                        .fit_sne_with_neighbors(black_box(&neighbors));
                     black_box(tsne.embedding());
                 });
             });
@@ -78,5 +100,13 @@ fn barnes_hut(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, exact, barnes_hut);
+fn fit_sne(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tsne_fit_sne");
+    group.sample_size(10);
+    bench_fit_sne::<f32>(&mut group, "f32");
+    bench_fit_sne::<f64>(&mut group, "f64");
+    group.finish();
+}
+
+criterion_group!(benches, exact, barnes_hut, fit_sne);
 criterion_main!(benches);

@@ -1,4 +1,6 @@
 pub(super) mod arena;
+pub(super) mod fft;
+pub(super) mod interpolation;
 pub(super) mod morton;
 pub(super) mod vptree;
 
@@ -19,6 +21,25 @@ use rand_distr::{Distribution, Normal};
 
 use num_traits::{AsPrimitive, Float};
 
+use rustfft::FftNum;
+
+/// Adaptive-gain constants shared by the exact and approximate updates: the gain is
+/// bumped by `GAIN_INCREMENT` when the gradient and velocity disagree in sign,
+/// decayed by `GAIN_DECAY` when they agree, and floored at `MIN_GAIN`.
+const GAIN_INCREMENT: f64 = 0.2;
+const GAIN_DECAY: f64 = 0.8;
+const MIN_GAIN: f64 = 0.01;
+
+/// Per-epoch scalars for the fused [`gradient_descent_step`].
+pub(super) struct GradientStep<T> {
+    /// Learning rate.
+    pub learning_rate: T,
+    /// Momentum coefficient.
+    pub momentum: T,
+    /// Reciprocal of the `Q` normalization term `Z`.
+    pub inverse_norm: T,
+}
+
 /// Checks whether the perplexity is too large for the number of samples.
 ///
 /// # Arguments
@@ -30,6 +51,7 @@ use num_traits::{AsPrimitive, Float};
 /// # Panics
 ///
 /// If the perplexity is too large.
+#[inline]
 pub(super) fn check_perplexity<T: Float + AsPrimitive<usize>>(perplexity: &T, n_samples: &usize) {
     if n_samples - 1 < 3 * perplexity.as_() {
         panic!("error: the provided perplexity is too large for the number of data points.\n");
@@ -408,9 +430,7 @@ pub(super) fn update_solution<T>(
 ) where
     T: Float + Send + Sync + AddAssign,
 {
-    let zero_point_two = T::from(0.2).unwrap();
-    let zero_point_eight = T::from(0.8).unwrap();
-    let zero_point_zero_one = T::from(0.01).unwrap();
+    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
 
     y.par_iter_mut()
         .zip(dy.par_iter())
@@ -418,16 +438,81 @@ pub(super) fn update_solution<T>(
         .zip(gains.par_iter_mut())
         .for_each(|(((y_el, dy_el), uy_el), gains_el)| {
             *gains_el = if dy_el.signum() != uy_el.signum() {
-                *gains_el + zero_point_two
+                *gains_el + gain_increment
             } else {
-                *gains_el * zero_point_eight
+                *gains_el * gain_decay
             };
-            if *gains_el < zero_point_zero_one {
-                *gains_el = zero_point_zero_one;
+            if *gains_el < min_gain {
+                *gains_el = min_gain;
             }
             *uy_el = *momentum * *uy_el - *learning_rate * *gains_el * *dy_el;
             *y_el += *uy_el
         });
+}
+
+/// Fused adaptive-gain gradient-descent step shared by the Barnes-Hut and FIt-SNE
+/// optimization loops.
+///
+///
+/// # Arguments
+///
+/// * `y` - embedding, updated in place.
+///
+/// * `positive_forces` - attractive forces, one row of `D` per sample.
+///
+/// * `negative_forces` - repulsive forces, one row of `D` per sample.
+///
+/// * `uy` - momentum (velocity) buffer.
+///
+/// * `gains` - per-coordinate adaptive gains.
+///
+/// * `step` - the per-epoch learning rate, momentum, and `1 / Z` scalars.
+pub(super) fn gradient_descent_step<T, const D: usize>(
+    y: &mut [T],
+    positive_forces: &[T],
+    negative_forces: &[T],
+    uy: &mut [T],
+    gains: &mut [T],
+    step: GradientStep<T>,
+) where
+    T: Float + Send + Sync + AddAssign,
+{
+    let GradientStep {
+        learning_rate,
+        momentum,
+        inverse_norm,
+    } = step;
+    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
+
+    y.par_chunks_mut(D)
+        .with_min_len(crate::PARALLEL_CODE_THRESHOLD)
+        .zip(positive_forces.par_chunks(D))
+        .zip(negative_forces.par_chunks(D))
+        .zip(uy.par_chunks_mut(D))
+        .zip(gains.par_chunks_mut(D))
+        .for_each(
+            |((((y_sample, positive), negative), uy_sample), gains_sample)| {
+                y_sample
+                    .iter_mut()
+                    .zip(positive.iter())
+                    .zip(negative.iter())
+                    .zip(uy_sample.iter_mut())
+                    .zip(gains_sample.iter_mut())
+                    .for_each(|((((y_el, pf), nf), uy_el), gain)| {
+                        let gradient = *pf - *nf * inverse_norm;
+                        *gain = if gradient.signum() != uy_el.signum() {
+                            *gain + gain_increment
+                        } else {
+                            *gain * gain_decay
+                        };
+                        if *gain < min_gain {
+                            *gain = min_gain;
+                        }
+                        *uy_el = momentum * *uy_el - learning_rate * *gain * gradient;
+                        *y_el += *uy_el;
+                    });
+            },
+        );
 }
 
 /// Adjust the P distribution values to the original ones in parallel.
@@ -583,8 +668,85 @@ where
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
     };
-    let inverse_q_sum = q_sum.recip();
+    sparse_kl_divergence::<T, D>(p_rows, p_columns, p_values, y, n_samples, q_sum.recip())
+}
 
+/// Evaluate the t-SNE cost for an interpolation (FIt-SNE) fit.
+///
+/// Mirrors [`evaluate_error_approximately`] but draws the `Q` normalizer `Z` from
+/// the same FFT interpolation the fit used for its repulsive forces, rather than a
+/// Barnes-Hut tree, so the reported divergence matches the optimized objective.
+///
+/// # Arguments
+///
+/// * `p_rows` - rows of the sparse, symmetric P distribution matrix.
+///
+/// * `p_columns` - columns of the sparse, symmetric P distribution matrix.
+///
+/// * `p_values` - sparse symmetric P distribution values.
+///
+/// * `y` - current embedding.
+///
+/// * `n_samples` - number of samples.
+pub(crate) fn evaluate_error_interpolated<T, const D: usize>(
+    p_rows: &[usize],
+    p_columns: &[u32],
+    p_values: &[T],
+    y: &[T],
+    n_samples: usize,
+) -> T
+where
+    T: Float
+        + FftNum
+        + Send
+        + Sync
+        + Sum
+        + AsPrimitive<usize>
+        + AddAssign
+        + SubAssign
+        + MulAssign
+        + DivAssign,
+{
+    // Reuse the optimizer's estimator for Z; the forces themselves are discarded.
+    let q_sum = {
+        let mut interpolant = interpolation::Interpolant::<T, D>::new();
+        let mut scratch_forces = vec![T::zero(); n_samples * D];
+        let mut q_sum = T::zero();
+        interpolant.repulsive_forces(y, n_samples, &mut scratch_forces, &mut q_sum);
+
+        q_sum
+    };
+
+    sparse_kl_divergence::<T, D>(p_rows, p_columns, p_values, y, n_samples, q_sum.recip())
+}
+
+/// Sums the sparse t-SNE Kullback-Leibler divergence over the symmetric `P` graph,
+/// given the reciprocal of the `Q` normalizer.
+///
+/// # Arguments
+///
+/// * `p_rows` - rows of the sparse, symmetric P distribution matrix.
+///
+/// * `p_columns` - columns of the sparse, symmetric P distribution matrix.
+///
+/// * `p_values` - sparse symmetric P distribution values.
+///
+/// * `y` - current embedding.
+///
+/// * `n_samples` - number of samples.
+///
+/// * `inverse_q_sum` - reciprocal of the `Q` normalization term `Z`.
+fn sparse_kl_divergence<T, const D: usize>(
+    p_rows: &[usize],
+    p_columns: &[u32],
+    p_values: &[T],
+    y: &[T],
+    n_samples: usize,
+    inverse_q_sum: T,
+) -> T
+where
+    T: Float + Send + Sync + Sum + AddAssign,
+{
     let mut partials: Vec<T> = vec![T::zero(); n_samples];
 
     partials
@@ -611,4 +773,14 @@ where
         });
 
     partials.par_iter().map(|partial| *partial).sum::<T>()
+}
+
+/// The three adaptive-gain constants converted to `T`, computed once per update pass.
+#[inline]
+fn gain_constants<T: Float>() -> (T, T, T) {
+    (
+        T::from(GAIN_INCREMENT).unwrap(),
+        T::from(GAIN_DECAY).unwrap(),
+        T::from(MIN_GAIN).unwrap(),
+    )
 }
