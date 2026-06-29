@@ -602,7 +602,7 @@ where
                 &self.momentum,
             );
 
-            // Zeroes the gradient (memset rather than a serial element-wise loop).
+            // Zeroes the gradient.
             self.dy.fill(T::zero());
 
             // Make solution zero mean.
