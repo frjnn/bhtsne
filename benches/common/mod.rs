@@ -77,7 +77,7 @@ pub fn brute_force_neighbors<T: Scalar>(samples: &[&[T]], k: usize) -> Vec<Vec<N
                 .map(|j| (j, euclidean(samples[i], samples[j])))
                 .collect();
             distances
-                .sort_by(|(_, a), (_, b)| a.partial_cmp(&b).expect("distance should not be NaN"));
+                .sort_by(|(_, a), (_, b)| a.partial_cmp(b).expect("distance should not be NaN"));
             distances
                 .into_iter()
                 .take(k)
