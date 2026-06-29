@@ -162,6 +162,7 @@ where
     fn locate_points(&mut self, y: &[T], min: T, box_width: T, boxes_per_axis: usize) {
         let inv_box_width = box_width.recip();
         let last_box = boxes_per_axis - 1;
+        let basis = LagrangeBasis::<INTERPOLATION_POINTS, T>::new();
         self.box_index
             .par_chunks_mut(D)
             .zip(self.weights.par_chunks_mut(D * INTERPOLATION_POINTS))
@@ -178,7 +179,7 @@ where
                     };
                     box_row[axis] = box_id;
                     let local = offset - T::from(box_id).unwrap();
-                    lagrange_weights(local, &mut weight_row[axis * INTERPOLATION_POINTS..]);
+                    basis.weights(local, &mut weight_row[axis * INTERPOLATION_POINTS..]);
                 }
             });
     }
@@ -380,27 +381,55 @@ const fn signed_lag(coord: usize, fft_len: usize) -> isize {
     }
 }
 
-/// The `INTERPOLATION_POINTS` Lagrange basis weights interpolating a value at
-/// `local in [0, 1]` from the box's equispaced nodes at `(k + 0.5) / p`.
-///
-/// `out` must have at least `INTERPOLATION_POINTS` elements; the first that many are
-/// overwritten.
-#[inline]
-fn lagrange_weights<T: Float>(local: T, out: &mut [T]) {
-    let p = INTERPOLATION_POINTS;
-    let half = T::from(0.5).unwrap();
-    let p_t = T::from(p).unwrap();
-    for (k, out_k) in out[..p].iter_mut().enumerate() {
-        let node_k = (T::from(k).unwrap() + half) / p_t;
-        let mut weight = T::one();
-        for m in 0..p {
-            if m == k {
-                continue;
-            }
-            let node_m = (T::from(m).unwrap() + half) / p_t;
-            weight = weight * (local - node_m) / (node_k - node_m);
+/// Node positions and reciprocal denominator products for the `I`
+/// Lagrange basis. Both depend only on the equispaced nodes at `(k + 0.5) / p`, not on
+/// the sample, so they are built once per [`InterpolationGrid::repulsive_forces`] and
+/// reused across every per-point, per-axis weight evaluation.
+struct LagrangeBasis<const I: usize, T> {
+    nodes: [T; I],
+    inv_denom: [T; I],
+}
+
+impl<const I: usize, T: Float> LagrangeBasis<I, T> {
+    fn new() -> Self {
+        let half = T::from(0.5).unwrap();
+        let p_recip = T::from(I).unwrap().recip();
+
+        let mut nodes = [T::zero(); I];
+        for (k, node_k) in nodes.iter_mut().enumerate() {
+            *node_k = (T::from(k).unwrap() + half) * p_recip;
         }
-        *out_k = weight;
+
+        let mut inv_denom = [T::one(); I];
+        for (k, inv_k) in inv_denom.iter_mut().enumerate() {
+            let mut denom = T::one();
+            for (m, &node_m) in nodes.iter().enumerate() {
+                if m != k {
+                    denom = denom * (nodes[k] - node_m);
+                }
+            }
+            *inv_k = denom.recip();
+        }
+
+        Self { nodes, inv_denom }
+    }
+
+    /// Writes the Lagrange basis weights interpolating a value at `local in [0, 1]`
+    /// into the first `I` elements of `out`.
+    ///
+    /// `out` must have at least `I` elements; the first that many are
+    /// overwritten.
+    #[inline]
+    fn weights(&self, local: T, out: &mut [T]) {
+        for (k, out_k) in out[..I].iter_mut().enumerate() {
+            let mut num = T::one();
+            for (m, &node_m) in self.nodes.iter().enumerate() {
+                if m != k {
+                    num = num * (local - node_m);
+                }
+            }
+            *out_k = num * self.inv_denom[k];
+        }
     }
 }
 
@@ -409,12 +438,14 @@ fn lagrange_weights<T: Float>(local: T, out: &mut [T]) {
 #[inline]
 fn charge_value<T: Float + Sum, const D: usize>(point: &[T], term: usize) -> T {
     if term == 0 {
-        T::one()
-    } else if term <= D {
-        point[term - 1]
-    } else {
-        point.iter().map(|&c| c * c).sum()
+        return T::one();
     }
+
+    if (1..=D).contains(&term) {
+        return point[term - 1];
+    }
+
+    point.iter().map(|&c| c * c).sum()
 }
 
 /// Resolves one of the `INTERPOLATION_POINTS^D` node combinations of a point's box
@@ -546,19 +577,25 @@ mod tests {
     /// cardinal at the nodes (weight one at its own node, zero at the others).
     #[test]
     fn lagrange_weights_partition_of_unity() {
+        let basis = LagrangeBasis::<INTERPOLATION_POINTS, f64>::new();
         for step in 0..=10 {
             let local = step as f64 / 10.0;
             let mut w = [0.0; INTERPOLATION_POINTS];
-            lagrange_weights(local, &mut w);
+            basis.weights(local, &mut w);
             let sum: f64 = w.iter().sum();
             assert!((sum - 1.0).abs() < 1e-12, "weights sum to {sum} at {local}");
         }
-        // Cardinality at the first node s_0 = 0.5 / p.
-        let node0 = 0.5 / INTERPOLATION_POINTS as f64;
-        let mut w = [0.0; INTERPOLATION_POINTS];
-        lagrange_weights(node0, &mut w);
-        assert!((w[0] - 1.0).abs() < 1e-12);
-        assert!(w[1].abs() < 1e-12 && w[2].abs() < 1e-12);
+        // Cardinality: at node s_j = (j + 0.5) / p the basis is one at j and zero
+        // at every other node.
+        for j in 0..INTERPOLATION_POINTS {
+            let node_j = (j as f64 + 0.5) / INTERPOLATION_POINTS as f64;
+            let mut w = [0.0; INTERPOLATION_POINTS];
+            basis.weights(node_j, &mut w);
+            for (k, &w_k) in w.iter().enumerate() {
+                let expected = if k == j { 1.0 } else { 0.0 };
+                assert!((w_k - expected).abs() < 1e-12, "w[{k}] = {w_k} at node {j}");
+            }
+        }
     }
 
     /// An empty embedding yields a zero normalizer and writes no forces.
