@@ -49,20 +49,23 @@
 //!     .write_csv("iris_embedding.csv")?;
 //! # Ok::<(), Box<dyn Error>>(())
 //! ```
+mod repulsion;
 mod tsne;
 
-#[cfg(test)]
-mod test;
+#[cfg(feature = "csv")]
+mod csv;
 
 use std::{
     iter::Sum,
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
 
-#[cfg(feature = "csv")]
-use std::{error::Error, fs::File};
-
 use num_traits::{Float, cast::AsPrimitive};
+
+use repulsion::{BarnesHutRepulsion, InterpolatedRepulsion, Repulsion};
+
+#[cfg(feature = "csv")]
+pub use csv::load_csv;
 
 /// Public re-exports.
 pub use {
@@ -1219,268 +1222,6 @@ where
 
         self.run_loop(grad_entries, strategy, fit)
     }
-
-    /// Writes the embedding to a csv file. If the embedding space dimensionality is either equal to
-    /// 2 or 3 the resulting csv file will have some simple headers:
-    ///
-    /// * x, y for 2 dimensions.
-    ///
-    /// * x, y, z for 3 dimensions.
-    ///
-    /// # Arguments
-    ///
-    /// * `file_path` - path of the file to write the embedding to.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error is something goes wrong during the I/O operations.
-    #[cfg(feature = "csv")]
-    pub fn write_csv(&mut self, path: &str) -> Result<&mut Self, Box<dyn Error>>
-    where
-        T: Float + ToString,
-    {
-        let mut writer = csv::Writer::from_path(path)?;
-
-        // String-ify the embedding.
-        let to_write = self
-            .y
-            .iter()
-            .map(|&el| el.to_string())
-            .collect::<Vec<String>>();
-
-        // Write headers.
-        match D {
-            2 => writer.write_record(["x", "y"])?,
-            3 => writer.write_record(["x", "y", "z"])?,
-            _ => (), // Write no headers for embedding dimensions greater that 3.
-        }
-        // Write records.
-        for record in to_write.chunks(D) {
-            writer.write_record(record)?
-        }
-        // Final flush.
-        writer.flush()?;
-
-        // Everything went smooth.
-        Ok(self)
-    }
-}
-
-/// Per-epoch repulsion strategy: produces the attractive and repulsive force rows
-/// for the current embedding and the reciprocal of the `Q` normalizer `Z`, and
-/// evaluates the matching KL divergence. The generic [`tSNE::run_loop`] owns one of
-/// these; the attractive force, the fused gradient-descent update, and the zero-mean
-/// recentering around it are identical across strategies, so only this trait differs
-/// between the Barnes-Hut and FIt-SNE paths.
-trait Repulsion<T, const D: usize> {
-    /// Fills the attractive (`positive`) and repulsive (`negative`) force rows for
-    /// the current embedding `y` and returns the reciprocal of the `Q` normalizer `Z`.
-    fn step(
-        &mut self,
-        y: &[T],
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        positive: &mut [T],
-        negative: &mut [T],
-    ) -> T;
-
-    /// Evaluates the KL divergence (the t-SNE loss) of the current embedding under
-    /// this strategy's repulsion approximation.
-    fn error(
-        &self,
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        y: &[T],
-        n_samples: usize,
-    ) -> T;
-}
-
-/// Barnes-Hut repulsion. A Morton arena summarizes the repulsive forces, computed in
-/// the same fused parallel pass as the attractive forces and the per-sample `Q`
-/// contributions, the latter reduced into `Z` afterwards.
-struct BarnesHutRepulsion<T, const D: usize> {
-    /// Morton arena, rebuilt over the embedding each epoch so its buffers persist.
-    arena: tsne::arena::Arena<T, D>,
-    /// Per-sample contribution to the `Q` normalizer, reduced after the force pass.
-    /// Sized to the sample count on the first epoch and reused thereafter.
-    q_sums: Vec<T>,
-    /// Approximation accuracy, retained for the KL-divergence evaluation.
-    theta: T,
-    /// `theta` squared, the form the cell-acceptance test compares against.
-    theta_sq: T,
-}
-
-impl<T, const D: usize> BarnesHutRepulsion<T, D>
-where
-    T: Float + Send + Sync + AddAssign,
-{
-    fn new(theta: T) -> Self {
-        Self {
-            arena: tsne::arena::Arena::empty(),
-            q_sums: Vec::new(),
-            theta,
-            theta_sq: theta * theta,
-        }
-    }
-}
-
-impl<T, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, D>
-where
-    T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
-    Dim<D>: Morton<D>,
-{
-    fn step(
-        &mut self,
-        y: &[T],
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        positive: &mut [T],
-        negative: &mut [T],
-    ) -> T {
-        let n_samples = y.len() / D;
-        // Rebuild the Morton arena over the current embedding.
-        self.arena.rebuild(y, n_samples);
-        self.q_sums.resize(n_samples, T::zero());
-
-        // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its
-        // `q_sum` term. The attractive pass reads coordinates directly, the repulsive pass walks
-        // the arena with a fixed-size stack. The stack lives in the `for_each_init` state, a
-        // stack-allocated array so the traversal never touches the heap: rayon calls the init
-        // once per work split, so a heap stack here would allocate per split and collapse the
-        // scaling at high thread counts.
-        let theta_sq = self.theta_sq;
-        let arena = &self.arena;
-        positive
-            .par_chunks_mut(D)
-            .zip(negative.par_chunks_mut(D))
-            .zip(self.q_sums.par_iter_mut())
-            .enumerate()
-            .for_each_init(
-                || {
-                    (
-                        [T::zero(); D],
-                        [T::zero(); D],
-                        [0u32; tsne::arena::STACK_CAP],
-                    )
-                },
-                |(edge_row, nonedge_row, stack),
-                 (index, ((positive_out, negative_out), q_sum_out))| {
-                    // Write each output row once to avoid false sharing.
-                    *edge_row = [T::zero(); D];
-                    *nonedge_row = [T::zero(); D];
-                    let mut q_sum = T::zero();
-                    tsne::arena::compute_edge_forces::<T, D>(
-                        index, y, p_rows, p_columns, p_values, edge_row,
-                    );
-                    arena.compute_non_edge_forces(
-                        index,
-                        theta_sq,
-                        y,
-                        nonedge_row,
-                        &mut q_sum,
-                        stack,
-                    );
-                    positive_out.copy_from_slice(&edge_row[..]);
-                    negative_out.copy_from_slice(&nonedge_row[..]);
-                    *q_sum_out = q_sum;
-                },
-            );
-
-        // Sequential q_sum: barrier-free and negligible against the forces. The reciprocal lets
-        // the fused update multiply instead of dividing per value.
-        let q_sum: T = self.q_sums.iter().copied().sum();
-        q_sum.recip()
-    }
-
-    fn error(
-        &self,
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        y: &[T],
-        n_samples: usize,
-    ) -> T {
-        tsne::evaluate_error_approximately::<T, D>(
-            p_rows, p_columns, p_values, y, n_samples, self.theta,
-        )
-    }
-}
-
-/// FIt-SNE repulsion. The attractive forces come from the sparse graph exactly as in
-/// the Barnes-Hut path, while the repulsive forces and the `Q` normalizer come from
-/// FFT-accelerated interpolation on an equal-spaced grid.
-struct InterpolatedRepulsion<T: FftNum, const D: usize> {
-    /// Interpolation workspace, grown in place as the embedding spreads.
-    interpolant: tsne::interpolation::Interpolant<T, D>,
-}
-
-impl<T, const D: usize> InterpolatedRepulsion<T, D>
-where
-    T: Send + Sync + Float + FftNum + AsPrimitive<usize> + Sum,
-{
-    fn new() -> Self {
-        Self {
-            interpolant: tsne::interpolation::Interpolant::new(),
-        }
-    }
-}
-
-impl<T, const D: usize> Repulsion<T, D> for InterpolatedRepulsion<T, D>
-where
-    T: Float
-        + FftNum
-        + Send
-        + Sync
-        + Sum
-        + AsPrimitive<usize>
-        + AddAssign
-        + SubAssign
-        + MulAssign
-        + DivAssign,
-{
-    fn step(
-        &mut self,
-        y: &[T],
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        positive: &mut [T],
-        negative: &mut [T],
-    ) -> T {
-        let n_samples = y.len() / D;
-        // Attractive (positive) forces from the sparse graph, parallel per sample.
-        // Identical to the Barnes-Hut edge forces, hence the shared routine.
-        positive
-            .par_chunks_mut(D)
-            .enumerate()
-            .for_each(|(index, row)| {
-                let row: &mut [T; D] = row.try_into().unwrap();
-                *row = [T::zero(); D];
-                tsne::arena::compute_edge_forces::<T, D>(
-                    index, y, p_rows, p_columns, p_values, row,
-                );
-            });
-
-        // Repulsive (negative) forces and the Q normalizer Z via FFT interpolation.
-        let mut z = T::zero();
-        self.interpolant
-            .repulsive_forces(y, n_samples, negative, &mut z);
-        z.recip()
-    }
-
-    fn error(
-        &self,
-        p_rows: &[usize],
-        p_columns: &[u32],
-        p_values: &[T],
-        y: &[T],
-        n_samples: usize,
-    ) -> T {
-        tsne::evaluate_error_interpolated::<T, D>(p_rows, p_columns, p_values, y, n_samples)
-    }
 }
 
 /// Copies sample `index`'s precomputed neighbor row (indices and distances) into the
@@ -1502,61 +1243,5 @@ fn copy_neighbor_row<T: Copy>(
         });
 }
 
-/// Loads data from a csv file.
-///
-/// # Arguments
-///
-/// * `file_path` - path of the file to load the data from.
-///
-/// * `has_headers` - whether the file has headers or not. if set to `true` the function will
-///   not parse the first line of the csv file.
-///
-/// * `skip` - an optional slice that specifies a subset of the file columns that must not be
-///   parsed.
-///
-/// * `f` - function that converts [`String`] into a data sample. It takes as an argument a single
-///   record field.
-///
-/// # Errors
-///
-/// Returns an error is something goes wrong during the I/O operations.
-#[cfg(feature = "csv")]
-pub fn load_csv<T, F>(
-    path: &str,
-    has_headers: bool,
-    skip: Option<&[usize]>,
-    f: F,
-) -> Result<Vec<T>, Box<dyn Error>>
-where
-    F: Fn(String) -> T,
-{
-    let mut data: Vec<T> = Vec::new();
-
-    let file = File::open(path)?;
-
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(has_headers)
-        .from_reader(file);
-
-    match skip {
-        Some(range) => {
-            for result in reader.records() {
-                let record = result?;
-
-                (0..record.len())
-                    .filter(|column| !range.contains(column))
-                    .for_each(|field| data.push(f(record.get(field).unwrap().to_string())));
-            }
-        }
-        None => {
-            for result in reader.records() {
-                let record = result?;
-
-                (0..record.len())
-                    .for_each(|field| data.push(f(record.get(field).unwrap().to_string())));
-            }
-        }
-    }
-
-    Ok(data)
-}
+#[cfg(test)]
+mod test;

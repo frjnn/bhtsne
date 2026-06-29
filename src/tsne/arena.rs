@@ -403,7 +403,7 @@ pub(crate) fn compute_edge_forces<T, const D: usize>(
     p_rows: &[usize],
     p_columns: &[u32],
     p_values: &[T],
-    positive_forces_row: &mut [T; D],
+    positive_forces_row: &mut [T],
 ) where
     T: Float + AddAssign,
 {
