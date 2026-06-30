@@ -109,6 +109,7 @@ pub struct Neighbor<T> {
     pub index: usize,
     pub distance: T,
 }
+
 /// A precomputed sparse, symmetric affinity graph in the CSR-like layout
 /// `barnes_hut` uses internally. Obtain via [`tSNE::affinities`] and inject
 /// with [`tSNE::with_affinities`].
@@ -541,6 +542,7 @@ where
         // Main fitting loop.
         for epoch in 0..self.epochs {
             // Compute pairwise squared euclidean distances between embeddings in parallel.
+            let (y_chunks, _) = self.y.as_chunks::<D>();
             tsne::compute_pairwise_distance_matrix(
                 &mut distances,
                 |ith: &[T; D], jth: &[T; D]| {
@@ -549,7 +551,7 @@ where
                         .map(|(&i, &j)| (i - j).powi(2))
                         .sum()
                 },
-                |index| (&self.y[index * D..index * D + D]).try_into().unwrap(),
+                |index| &y_chunks[*index],
                 n_samples,
             );
 
@@ -567,23 +569,20 @@ where
 
             // Immutable borrow to self must happen outside of the inner sequential
             // loop. The outer parallel loop already has a mutable borrow.
-            let y = &self.y;
-            self.dy
-                .par_chunks_mut(D)
-                .zip(self.y.par_chunks(D))
+            let (dy_chunks, _) = self.dy.as_chunks_mut::<D>();
+            dy_chunks
+                .par_iter_mut()
+                .zip(y_chunks.par_iter())
                 .zip(self.p_values.par_chunks(n_samples))
                 .zip(self.q_values.par_chunks(n_samples))
                 .for_each(
                     |(((dy_sample, y_sample), p_values_sample), q_values_sample)| {
-                        let dy_sample: &mut [T; D] = dy_sample.try_into().unwrap();
-                        let y_sample: &[T; D] = y_sample.try_into().unwrap();
                         p_values_sample
                             .iter()
                             .zip(q_values_sample.iter())
-                            .zip(y.chunks(D))
+                            .zip(y_chunks.iter())
                             .for_each(|((&p, &q), other_sample)| {
-                                let other_sample: &[T; D] = other_sample.try_into().unwrap();
-                                let m: T = (p - q * inverse_q_sum) * q;
+                                let m = (p - q * inverse_q_sum) * q;
                                 dy_sample
                                     .iter_mut()
                                     .zip(y_sample.iter())
@@ -691,6 +690,7 @@ where
                 Fit::BarnesHut { theta },
             );
         }
+
         // No cached affinities or mismatched dataset, rebuild.
         let data = self.data;
         // Number of points to consider when approximating the conditional distribution P.
@@ -992,7 +992,6 @@ where
     /// Returns the affinity graph from the last `barnes_hut` fit in pristine
     /// (pre-exaggeration) form, or `None` if no Barnes-Hut fit has run.
     /// Its values sum to approximately 1.
-    ///
     pub fn affinities(&self) -> Option<SparseAffinities<T>> {
         if self.p_rows.is_empty() {
             return None;
@@ -1182,6 +1181,7 @@ where
         {
             return false;
         }
+
         let p_rows = &self.p_rows;
         let p_columns = &self.p_columns;
         neighbors.iter().enumerate().all(|(i, row)| {

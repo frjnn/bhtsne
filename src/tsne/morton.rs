@@ -136,8 +136,9 @@ pub(crate) fn quantize<T: Float, const D: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    use super::*;
 
     #[test]
     fn encode_decode_roundtrips_2d() {

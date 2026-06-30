@@ -37,6 +37,7 @@ pub(crate) const STACK_CAP: usize = 256;
 /// Children are only the non-empty orthants of a cell, stored back to back, rather than a fixed
 /// `2^D` slots: empty orthants are never emitted, which keeps the arena lean and the traversal off
 /// dead cells. `child_count` is at most `2^D`.
+#[derive(Debug)]
 struct Node<T, const D: usize> {
     center_of_mass: [T; D],
     count: u32,
@@ -46,6 +47,7 @@ struct Node<T, const D: usize> {
 }
 
 /// A Morton linear quadtree (`D == 2`) or octree (`D == 3`) over the embedding, in one arena.
+#[derive(Debug)]
 pub(crate) struct Arena<T, const D: usize> {
     nodes: Vec<Node<T, D>>,
     /// Build scratch: each emitted node's half-open window in `sorted`. Retained with `nodes` so a
@@ -83,6 +85,7 @@ where
                     min_a[axis] = min_a[axis].min(min_b[axis]);
                     max_a[axis] = max_a[axis].max(max_b[axis]);
                 }
+
                 (min_a, max_a)
             },
         )
@@ -266,9 +269,10 @@ where
                     for slot in start..end {
                         let index = sorted[slot as usize].1 as usize;
                         let point = &y[index * D..index * D + D];
-                        for axis in 0..D {
-                            center[axis] += point[axis];
-                        }
+                        center
+                            .iter_mut()
+                            .zip(point.iter())
+                            .for_each(|(ci, pi)| *ci += *pi);
                     }
                     let inverse = T::from(node.count).unwrap().recip();
                     center
@@ -320,13 +324,6 @@ where
         debug_assert!(check_coms_within_cells::<T, D>(
             nodes, ranges, sorted, &min, &extent, bits
         ));
-    }
-
-    /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
-    /// it crosses into a sibling module that cannot reach the private node array.
-    #[cfg(test)]
-    pub(crate) fn root_count(&self) -> usize {
-        self.nodes.first().map_or(0, |node| node.count as usize)
     }
 
     /// Accumulates the non-edge (repulsive) Barnes-Hut forces on point `index` into
@@ -458,6 +455,15 @@ where
             node.center_of_mass[axis] >= low - slack && node.center_of_mass[axis] <= high + slack
         })
     })
+}
+
+#[cfg(test)]
+impl<T, const D: usize> Arena<T, D> {
+    /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
+    /// it crosses into a sibling module that cannot reach the private node array.
+    pub(crate) fn root_count(&self) -> usize {
+        self.nodes.first().map_or(0, |node| node.count as usize)
+    }
 }
 
 #[cfg(test)]
