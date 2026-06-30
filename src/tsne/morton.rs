@@ -116,7 +116,7 @@ impl Morton<3> for Dim<3> {
 /// degenerate zero-width axis, which collapses to bucket `0`). The result is clamped to
 /// `[0, 2^B - 1]`, so the maximum coordinate maps to the last bucket rather than overflowing.
 pub(crate) fn quantize<T: Float, const D: usize>(
-    point: &[T],
+    point: &[T; D],
     min: &[T; D],
     inv_scale: &[T; D],
     max_bucket: u32,

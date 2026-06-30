@@ -10,7 +10,7 @@
 //! Morton quantization is total, so every point maps to exactly one cell and point conservation is
 //! automatic, which the build asserts (leaf masses sum to `n`).
 
-use std::ops::AddAssign;
+use std::{array, ops::AddAssign};
 
 use num_traits::Float;
 
@@ -22,6 +22,9 @@ use super::morton::{Dim, Morton, quantize};
 
 /// `first_child` value marking a leaf, a node with no children in the arena.
 const SENTINEL: u32 = u32::MAX;
+
+/// Slack fraction.
+const SLACK_FRACTION: f64 = 0.03;
 
 /// Capacity of the traversal stack. A root-to-leaf path crosses at most `BITS` internal cells (a
 /// child's level is strictly greater than its parent's), and each pushes at most `2^D - 1`
@@ -62,11 +65,12 @@ pub(crate) struct Arena<T, const D: usize> {
 }
 
 /// Per-axis bounding box of the embedding, reduced in parallel.
-fn bounding_box<T, const D: usize>(y: &[T]) -> ([T; D], [T; D])
+fn bounding_box<T, const D: usize>(y_chunks: &[[T; D]]) -> ([T; D], [T; D])
 where
     T: Float + Send + Sync,
 {
-    y.par_chunks_exact(D)
+    y_chunks
+        .par_iter()
         .with_min_len(PARALLEL_CODE_THRESHOLD)
         .fold(
             || ([T::max_value(); D], [-T::max_value(); D]),
@@ -75,6 +79,7 @@ where
                     min[axis] = min[axis].min(point[axis]);
                     max[axis] = max[axis].max(point[axis]);
                 }
+
                 (min, max)
             },
         )
@@ -146,22 +151,20 @@ where
             return;
         }
 
+        let (y_chunks, _) = y.as_chunks::<D>();
+
         // 1. Bounding box and the derived quantization scale.
-        let (min, max) = bounding_box::<T, D>(y);
-        let mut extent = [T::zero(); D];
-        for axis in 0..D {
-            extent[axis] = max[axis] - min[axis];
-        }
+        let (min, max) = bounding_box::<T, D>(y_chunks);
+        let extent: [T; D] = array::from_fn(|axis| max[axis] - min[axis]);
         let scale = T::from(1u64 << bits).unwrap();
         let max_bucket = ((1u64 << bits) - 1) as u32;
-        let mut inv_scale = [T::zero(); D];
-        for axis in 0..D {
-            inv_scale[axis] = if extent[axis] > T::zero() {
+        let inv_scale: [T; D] = array::from_fn(|axis| {
+            if extent[axis] > T::zero() {
                 scale / extent[axis]
             } else {
                 T::zero()
-            };
-        }
+            }
+        });
 
         // The squared half-width per level for the theta test: cell full width per axis at level L
         // is extent / 2^L, so the maximum half-width is max(extent) / 2^(L+1).
@@ -179,10 +182,11 @@ where
                 .into_par_iter()
                 .with_min_len(PARALLEL_CODE_THRESHOLD)
                 .map(|i| {
-                    let point = &y[i * D..i * D + D];
+                    let point = &y_chunks[i];
                     let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
                         point, &min, &inv_scale, max_bucket,
                     ));
+
                     (code, i as u32)
                 }),
         );
@@ -263,23 +267,22 @@ where
             .par_iter_mut()
             .zip(ranges.par_iter())
             .with_min_len(PARALLEL_CODE_THRESHOLD)
+            .filter(|(node, _)| node.first_child == SENTINEL)
             .for_each(|(node, &(start, end))| {
-                if node.first_child == SENTINEL {
-                    let mut center = [T::zero(); D];
-                    for slot in start..end {
-                        let index = sorted[slot as usize].1 as usize;
-                        let point = &y[index * D..index * D + D];
-                        center
-                            .iter_mut()
-                            .zip(point.iter())
-                            .for_each(|(ci, pi)| *ci += *pi);
-                    }
-                    let inverse = T::from(node.count).unwrap().recip();
+                let mut center = [T::zero(); D];
+                for slot in start..end {
+                    let index = sorted[slot as usize].1 as usize;
+                    let point = &y_chunks[index];
                     center
                         .iter_mut()
-                        .for_each(|value| *value = *value * inverse);
-                    node.center_of_mass = center;
+                        .zip(point.iter())
+                        .for_each(|(ci, pi)| *ci += *pi);
                 }
+                let inverse = T::from(node.count).unwrap().recip();
+                center
+                    .iter_mut()
+                    .for_each(|value| *value = *value * inverse);
+                node.center_of_mass = center;
             });
 
         // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
@@ -346,7 +349,8 @@ where
         if self.nodes.is_empty() {
             return;
         }
-        let query = &y[index * D..index * D + D];
+        let (y_chunks, _) = y.as_chunks::<D>();
+        let query = &y_chunks[index];
 
         // Explicit stack with a local top cursor over `stack`, which holds at most `STACK_CAP`
         // entries (see its bound). No heap allocation occurs on this hot path.
@@ -404,10 +408,12 @@ pub(crate) fn compute_edge_forces<T, const D: usize>(
 ) where
     T: Float + AddAssign,
 {
-    let sample = &y[index * D..index * D + D];
+    let (y_chunks, _) = y.as_chunks::<D>();
+
+    let sample = &y_chunks[index];
     for entry in p_rows[index]..p_rows[index + 1] {
         let other = p_columns[entry] as usize;
-        let other_sample = &y[other * D..other * D + D];
+        let other_sample = &y_chunks[other];
 
         let mut displacement = [T::zero(); D];
         let mut distance = T::zero();
@@ -438,7 +444,8 @@ where
     T: Float,
     Dim<D>: Morton<D>,
 {
-    let slack_fraction = T::from(1e-3).unwrap();
+    let slack_fraction = T::from(SLACK_FRACTION).unwrap();
+
     nodes.iter().zip(ranges.iter()).all(|(node, &(start, _))| {
         let level = node.level as u32;
         let coords = <Dim<D> as Morton<D>>::decode(sorted[start as usize].0);

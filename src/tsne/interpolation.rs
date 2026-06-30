@@ -163,10 +163,12 @@ where
         let inv_box_width = box_width.recip();
         let last_box = boxes_per_axis - 1;
         let basis = LagrangeBasis::<INTERPOLATION_POINTS, T>::new();
-        self.box_index
-            .par_chunks_mut(D)
+        let (box_index_chunks, _) = self.box_index.as_chunks_mut::<D>();
+        let (y_chunks, _) = y.as_chunks::<D>();
+        box_index_chunks
+            .par_iter_mut()
             .zip(self.weights.par_chunks_mut(D * INTERPOLATION_POINTS))
-            .zip(y.par_chunks(D))
+            .zip(y_chunks.par_iter())
             .for_each(|((box_row, weight_row), point)| {
                 for axis in 0..D {
                     // Locate the box and the point's relative position within it.
@@ -250,10 +252,12 @@ where
         // and weights. The scatter target is a computed node index, so the grid stays
         // indexed; the per-point rows are walked as aligned chunk iterators.
         let real_grid = &mut self.real_grid;
+        let (y_chunks, _) = y.as_chunks::<D>();
+        let (box_chunks, _) = self.box_index.as_chunks::<D>();
         real_grid.iter_mut().for_each(|v| *v = T::zero());
-        for ((point, box_row), weight_row) in y
-            .chunks_exact(D)
-            .zip(self.box_index.chunks_exact(D))
+        for ((point, box_row), weight_row) in y_chunks
+            .iter()
+            .zip(box_chunks.iter())
             .zip(self.weights.chunks_exact(D * INTERPOLATION_POINTS))
         {
             let charge = charge_value::<T, D>(point, term);
@@ -279,12 +283,12 @@ where
         let fft_len = self.fft_len;
         let combinations = INTERPOLATION_POINTS.pow(D as u32);
         let real_grid = &self.real_grid;
-        let box_index = &self.box_index;
+        let (box_chunks, _) = self.box_index.as_chunks::<D>();
         let weights = &self.weights;
 
         self.potentials
             .par_chunks_mut(Self::TERMS)
-            .zip(box_index.par_chunks(D))
+            .zip(box_chunks.par_iter())
             .zip(weights.par_chunks(D * INTERPOLATION_POINTS))
             .for_each(|((point_terms, box_row), weight_row)| {
                 let mut phi = T::zero();
@@ -300,9 +304,11 @@ where
     /// potentials, per the `D + 2` term identity in the module docs.
     fn reconstruct(&self, y: &[T], n_samples: usize, negative_forces: &mut [T], z: &mut T) {
         let two = T::from(2.0).unwrap();
-        let z_sum: T = negative_forces
-            .par_chunks_mut(D)
-            .zip(y.par_chunks(D))
+        let (negative_forces_chunks, _) = negative_forces.as_chunks_mut::<D>();
+        let (y_chunks, _) = y.as_chunks::<D>();
+        let z_sum: T = negative_forces_chunks
+            .par_iter_mut()
+            .zip(y_chunks.par_iter())
             .zip(self.potentials.par_chunks(Self::TERMS))
             .map(|((force_row, point), phi)| {
                 let density = phi[0];
@@ -316,6 +322,7 @@ where
                     norm_sq = norm_sq + point[d] * point[d];
                     cross = cross + point[d] * first_moment;
                 }
+
                 (T::one() + norm_sq) * density - two * cross + squared_norm_potential
             })
             .sum();
@@ -436,7 +443,7 @@ impl<const I: usize, T: Float> LagrangeBasis<I, T> {
 /// Charge of sample `point` for a given term: `1` for the density term `0`, the
 /// coordinate `y^d` for first-moment term `1 + d`, and `||y||^2` for the last term.
 #[inline]
-fn charge_value<T: Float + Sum, const D: usize>(point: &[T], term: usize) -> T {
+fn charge_value<T: Float + Sum, const D: usize>(point: &[T; D], term: usize) -> T {
     if term == 0 {
         return T::one();
     }
@@ -454,7 +461,7 @@ fn charge_value<T: Float + Sum, const D: usize>(point: &[T], term: usize) -> T {
 #[inline]
 fn node_of_combo<T: Float, const D: usize>(
     combo: usize,
-    box_row: &[usize],
+    box_row: &[usize; D],
     weight_row: &[T],
     fft_len: usize,
 ) -> (usize, T) {
