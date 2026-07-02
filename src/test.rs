@@ -1174,6 +1174,15 @@ fn arena_build_maintains_invariants() {
     assert_eq!(arena.root_count(), N, "arena lost or invented points");
 }
 
+/// Verify the 5D Morton codec and arena path compile and function correctly.
+#[test]
+fn arena_builds_5d() {
+    const N: usize = 500;
+    let data = lcg_samples(N, 5, 42);
+    let arena = tsne::arena::Arena::<f32, u128, 5>::new(&data, N);
+    assert_eq!(arena.root_count(), N);
+}
+
 /// End-to-end regression test for the same bug, reproducing the symptom directly: corrupted
 /// repulsive forces let attraction collapse the whole embedding onto a handful of coordinates. A
 /// healthy run spreads the points out, so most embedded positions are distinct.
@@ -1912,5 +1921,41 @@ fn barnes_hut_runs_in_four_dimensions() {
         .barnes_hut(THETA, |a, b| euclidean(a, b));
     let embedding = tsne.embedding();
     assert_eq!(embedding.len(), N * 4);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}
+
+/// Smoke test for the 3D Barnes-Hut path: the embedding stays finite and correctly sized
+/// after a short fit.
+#[test]
+fn barnes_hut_runs_in_three_dimensions() {
+    const N: usize = 200;
+    const DIN: usize = 5;
+
+    let data = lcg_samples(N, DIN, 43);
+    let samples: Vec<&[f32]> = data.chunks(DIN).collect();
+    let mut tsne: tSNE<f32, &[f32], 3> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * 3);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}
+
+/// Smoke test for the 5D Barnes-Hut path: the embedding stays finite and correctly sized
+/// after a short fit.
+#[test]
+fn barnes_hut_runs_in_five_dimensions() {
+    const N: usize = 200;
+    const DIN: usize = 6;
+
+    let data = lcg_samples(N, DIN, 44);
+    let samples: Vec<&[f32]> = data.chunks(DIN).collect();
+    let mut tsne: tSNE<f32, &[f32], 5> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * 5);
     assert!(embedding.iter().all(|v| v.is_finite()));
 }
