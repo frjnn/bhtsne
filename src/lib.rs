@@ -435,13 +435,15 @@ where
                 &self.y,
                 n_samples,
             )),
-            Fit::BarnesHut { theta } => Some(BarnesHutRepulsion::<T, D>::new(*theta).error(
-                &self.p_rows,
-                &self.p_columns,
-                &self.p_values,
-                &self.y,
-                n_samples,
-            )),
+            Fit::BarnesHut { theta } => Some(
+                BarnesHutRepulsion::<T, <Dim<D> as Morton<D>>::Word, D>::new(*theta).error(
+                    &self.p_rows,
+                    &self.p_columns,
+                    &self.p_values,
+                    &self.y,
+                    n_samples,
+                ),
+            ),
             Fit::Interpolated => Some(InterpolatedRepulsion::<T, D>::new().error(
                 &self.p_rows,
                 &self.p_columns,
@@ -686,7 +688,7 @@ where
         if self.has_cached_affinities(n_samples) {
             return self.run_cached(
                 n_samples,
-                BarnesHutRepulsion::new(theta),
+                BarnesHutRepulsion::<T, <Dim<D> as Morton<D>>::Word, D>::new(theta),
                 Fit::BarnesHut { theta },
             );
         }
@@ -712,7 +714,7 @@ where
                     &metric_f,
                 );
             },
-            BarnesHutRepulsion::new(theta),
+            BarnesHutRepulsion::<T, <Dim<D> as Morton<D>>::Word, D>::new(theta),
             Fit::BarnesHut { theta },
         )
     }
@@ -742,7 +744,7 @@ where
         self.validate_fit_params(theta);
         self.approximate_fit_with_neighbors(
             neighbors,
-            BarnesHutRepulsion::new(theta),
+            BarnesHutRepulsion::<T, <Dim<D> as Morton<D>>::Word, D>::new(theta),
             Fit::BarnesHut { theta },
         )
     }

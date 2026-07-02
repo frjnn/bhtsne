@@ -56,9 +56,12 @@ pub(crate) trait Repulsion<T, const D: usize> {
 /// Barnes-Hut repulsion. A Morton arena summarizes the repulsive forces, computed in
 /// the same fused parallel pass as the attractive forces and the per-sample `Q`
 /// contributions, the latter reduced into `Z` afterwards.
-pub(crate) struct BarnesHutRepulsion<T, const D: usize> {
+pub(crate) struct BarnesHutRepulsion<T, W, const D: usize>
+where
+    W: tsne::morton::MortonWord,
+{
     /// Morton arena, rebuilt over the embedding each epoch so its buffers persist.
-    arena: tsne::arena::Arena<T, D>,
+    arena: tsne::arena::Arena<T, W, D>,
     /// Per-sample contribution to the `Q` normalizer, reduced after the force pass.
     /// Sized to the sample count on the first epoch and reused thereafter.
     q_sums: Vec<T>,
@@ -68,9 +71,10 @@ pub(crate) struct BarnesHutRepulsion<T, const D: usize> {
     theta_sq: T,
 }
 
-impl<T, const D: usize> BarnesHutRepulsion<T, D>
+impl<T, W, const D: usize> BarnesHutRepulsion<T, W, D>
 where
     T: Float + Send + Sync + AddAssign,
+    W: tsne::morton::MortonWord,
 {
     pub(crate) fn new(theta: T) -> Self {
         Self {
@@ -82,10 +86,11 @@ where
     }
 }
 
-impl<T, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, D>
+impl<T, W, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, W, D>
 where
     T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
-    tsne::morton::Dim<D>: tsne::morton::Morton<D>,
+    W: tsne::morton::MortonWord,
+    tsne::morton::Dim<D>: tsne::morton::Morton<D, Word = W>,
 {
     fn step(
         &mut self,

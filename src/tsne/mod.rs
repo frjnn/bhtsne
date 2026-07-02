@@ -646,7 +646,8 @@ where
 {
     // Get estimate of normalization term.
     let q_sum = {
-        let arena = arena::Arena::<T, D>::new(y, n_samples);
+        let arena =
+            arena::Arena::<T, <morton::Dim<D> as morton::Morton<D>>::Word, D>::new(y, n_samples);
         let theta_sq = theta * theta;
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 

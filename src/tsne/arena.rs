@@ -2,10 +2,10 @@
 //! loop summarizes repulsive forces over.
 //!
 //! Every cell lives in one [`Vec<Node>`]. The build quantizes the embedding into per-axis integer
-//! coordinates, interleaves them into `u64` Morton codes, sorts a `(code, index)` permutation, and
-//! walks the sorted codes breadth first to emit nodes whose children occupy a contiguous arena
-//! range reached through `first_child`. A cell stores only the summary the traversal reads (center
-//! of mass, count, level), never raw coordinates.
+//! coordinates, interleaves them into Morton codes, sorts a `(code, index)` permutation, and walks
+//! the sorted codes breadth first to emit nodes whose children occupy a contiguous arena range
+//! reached through `first_child`. A cell stores only the summary the traversal reads (center of
+//! mass, count, level), never raw coordinates.
 //!
 //! Morton quantization is total, so every point maps to exactly one cell and point conservation is
 //! automatic, which the build asserts (leaf masses sum to `n`).
@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use crate::PARALLEL_CODE_THRESHOLD;
 
-use super::morton::{Dim, Morton, quantize};
+use super::morton::{Dim, Morton, MortonWord, quantize};
 
 /// `first_child` value marking a leaf, a node with no children in the arena.
 const SENTINEL: u32 = u32::MAX;
@@ -42,15 +42,19 @@ struct Node<T, const D: usize> {
     level: u8,
 }
 
-/// A Morton linear quadtree (`D == 2`), octree (`D == 3`), or 16-cell tree (`D == 4`) over the embedding, in one arena.
+/// A Morton linear quadtree (`D == 2`), octree (`D == 3`), or 16-cell tree (`D == 4`) over the
+/// embedding, in one arena. `W` is the Morton word type (e.g. `u64` for D in {2,3,4}).
 #[derive(Debug)]
-pub(crate) struct Arena<T, const D: usize> {
+pub(crate) struct Arena<T, W, const D: usize>
+where
+    W: MortonWord,
+{
     nodes: Vec<Node<T, D>>,
     /// Build scratch: each emitted node's half-open window in `sorted`. Retained with `nodes` so a
     /// rebuild reuses the allocation rather than reallocating it every epoch.
     ranges: Vec<(u32, u32)>,
     /// The `(Morton code, point index)` permutation, retained across rebuilds to reuse its allocation.
-    sorted: Vec<(u64, u32)>,
+    sorted: Vec<(W, u32)>,
     /// Squared maximum half-width of a cell at each level, indexed by `Node::level`. The theta
     /// acceptance test compares this against `theta^2 * dist`, the squared form of the reference
     /// `max_half_width / sqrt(dist) < theta`, avoiding a square root per visit.
@@ -89,9 +93,10 @@ where
         )
 }
 
-impl<T, const D: usize> Arena<T, D>
+impl<T, W, const D: usize> Arena<T, W, D>
 where
     T: Float + Send + Sync + AddAssign,
+    W: MortonWord,
 {
     /// Creates an empty arena. The epoch loop holds one of these and rebuilds it each epoch so the
     /// buffers persist and are reused.
@@ -114,7 +119,7 @@ where
     /// build always satisfies.
     pub(crate) fn new(y: &[T], n_samples: usize) -> Self
     where
-        Dim<D>: Morton<D>,
+        Dim<D>: Morton<D, Word = W>,
     {
         let mut arena = Self::empty();
         arena.rebuild(y, n_samples);
@@ -131,7 +136,7 @@ where
     /// build always satisfies.
     pub(crate) fn rebuild(&mut self, y: &[T], n_samples: usize)
     where
-        Dim<D>: Morton<D>,
+        Dim<D>: Morton<D, Word = W>,
     {
         let bits = <Dim<D> as Morton<D>>::BITS;
 
@@ -206,7 +211,7 @@ where
         });
         ranges.push((0, n_samples as u32));
 
-        let mask = (1u64 << D) - 1;
+        let mask = W::d_bit_mask(D as u32);
         let mut node = 0usize;
         while node < nodes.len() {
             let (start, end) = ranges[node];
@@ -221,7 +226,7 @@ where
             // sits in the D-bit group that first splits the range, so the node skips straight to
             // that level rather than emitting single-child chains.
             let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
-            let highest_diff = 63 - xor.leading_zeros();
+            let highest_diff = xor.msb_position();
             let level = (bits - 1) - highest_diff / D as u32;
             let shift = D as u32 * (bits - 1 - level);
             nodes[node].level = level as u8;
@@ -317,7 +322,7 @@ where
             "arena lost or invented points"
         );
 
-        debug_assert!(check_coms_within_cells::<T, D>(
+        debug_assert!(check_coms_within_cells::<T, W, D>(
             nodes, ranges, sorted, &min, &extent, bits
         ));
     }
@@ -424,17 +429,18 @@ pub(crate) fn compute_edge_forces<T, const D: usize>(
 /// Whether every node's center of mass lies inside its Morton cell. Used only at build time in
 /// debug builds. Derives each cell from a representative member code, the node level, and the
 /// bounding box, so it needs the still-live sorted codes and ranges rather than per-node storage.
-fn check_coms_within_cells<T, const D: usize>(
+fn check_coms_within_cells<T, W, const D: usize>(
     nodes: &[Node<T, D>],
     ranges: &[(u32, u32)],
-    sorted: &[(u64, u32)],
+    sorted: &[(W, u32)],
     min: &[T; D],
     extent: &[T; D],
     bits: u32,
 ) -> bool
 where
     T: Float,
-    Dim<D>: Morton<D>,
+    W: MortonWord,
+    Dim<D>: Morton<D, Word = W>,
 {
     let slack_fraction = T::from(SLACK_FRACTION).unwrap();
 
@@ -457,7 +463,10 @@ where
 }
 
 #[cfg(test)]
-impl<T, const D: usize> Arena<T, D> {
+impl<T, W, const D: usize> Arena<T, W, D>
+where
+    W: MortonWord,
+{
     /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
     /// it crosses into a sibling module that cannot reach the private node array.
     pub(crate) fn root_count(&self) -> usize {
@@ -503,7 +512,7 @@ mod tests {
         for value in data.iter_mut() {
             *value += 100.0;
         }
-        let arena = Arena::<f32, 2>::new(&data, N);
+        let arena = Arena::<f32, u64, 2>::new(&data, N);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -511,7 +520,7 @@ mod tests {
     fn build_conserves_points_3d() {
         const N: usize = 1_500;
         let data = lcg_cloud(N, 3, 23);
-        let arena = Arena::<f32, 3>::new(&data, N);
+        let arena = Arena::<f32, u64, 3>::new(&data, N);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -520,7 +529,7 @@ mod tests {
     fn root_center_of_mass_equals_the_mean() {
         const N: usize = 1_000;
         let data = lcg_cloud(N, 2, 5);
-        let arena = Arena::<f32, 2>::new(&data, N);
+        let arena = Arena::<f32, u64, 2>::new(&data, N);
         let expected = mean::<2>(&data, N);
         let root = &arena.nodes[0];
         assert!((root.center_of_mass[0] - expected[0]).abs() < 1e-3);
@@ -533,7 +542,7 @@ mod tests {
     fn duplicate_points_collapse_to_one_leaf() {
         const N: usize = 500;
         let data = vec![3.5f32; N * 2];
-        let arena = Arena::<f32, 2>::new(&data, N);
+        let arena = Arena::<f32, u64, 2>::new(&data, N);
         assert_eq!(arena.root_count(), N);
         // All identical: the root itself is the single collapsed leaf.
         assert_eq!(arena.nodes.len(), 1);
@@ -545,7 +554,7 @@ mod tests {
     #[test]
     fn single_point_builds_a_leaf_root() {
         let data = [2.0f32, -1.0];
-        let arena = Arena::<f32, 2>::new(&data, 1);
+        let arena = Arena::<f32, u64, 2>::new(&data, 1);
         assert_eq!(arena.root_count(), 1);
         assert_eq!(arena.nodes.len(), 1);
         assert_eq!(arena.nodes[0].center_of_mass, [2.0, -1.0]);
@@ -554,7 +563,7 @@ mod tests {
     /// An empty input builds an empty arena and the force pass is a no-op.
     #[test]
     fn empty_input_builds_empty_arena() {
-        let arena = Arena::<f32, 2>::new(&[], 0);
+        let arena = Arena::<f32, u64, 2>::new(&[], 0);
         assert_eq!(arena.root_count(), 0);
         let mut forces = [0.0f32; 2];
         let mut q_sum = 0.0f32;

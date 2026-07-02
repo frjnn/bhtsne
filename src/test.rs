@@ -1169,7 +1169,7 @@ fn arena_build_maintains_invariants() {
         *value += 100.0;
     }
 
-    let arena = tsne::arena::Arena::<f32, 2>::new(&data, N);
+    let arena = tsne::arena::Arena::<f32, u64, 2>::new(&data, N);
 
     assert_eq!(arena.root_count(), N, "arena lost or invented points");
 }
