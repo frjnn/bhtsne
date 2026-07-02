@@ -65,7 +65,7 @@ bhtsne::tSNE::<f32, &[f32], 2>::new(&samples)
 
 In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
 
-The tree-accelerated `barnes_hut` and `barnes_hut_with_neighbors` support an embedding dimensionality `D` of 2, 3, 4, 5, or 6, the dimensionalities a Z-order code covers with ample precision (32, 21, 16, 25, and 21 bits per axis, respectively). The exact `exact` path stays general for any `D`.
+The tree-accelerated `barnes_hut` and `barnes_hut_with_neighbors` support an embedding dimensionality `D` of 2, 3, 4, 5, 6, or 7, the dimensionalities a Z-order code covers with ample precision (32, 21, 16, 25, 21, and 18 bits per axis, respectively). The exact `exact` path stays general for any `D`.
 
 ## FIt-SNE
 
