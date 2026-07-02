@@ -15,7 +15,7 @@ license = "MIT"
 name = "bhtsne"
 readme = "README.md"
 repository = "https://github.com/frjnn/bhtsne"
-version = "0.7.9"
+version = "0.7.10"
 
 [features]
 default = ["csv"]
