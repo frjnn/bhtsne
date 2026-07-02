@@ -653,14 +653,14 @@ where
         q_sums.par_iter_mut().enumerate().for_each(|(index, sum)| {
             // Local scratch: the repulsive forces are not needed here, only their q_sum.
             let mut negative_forces = [T::zero(); D];
-            let mut stack = [0u32; arena::STACK_CAP];
+            let mut stack = <morton::Dim<D> as morton::Morton<D>>::empty_stack();
             arena.compute_non_edge_forces(
                 index,
                 theta_sq,
                 y,
                 &mut negative_forces,
                 sum,
-                &mut stack,
+                stack.as_mut(),
             );
         });
 

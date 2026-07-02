@@ -67,6 +67,7 @@ plotters = { version = "0.3", default-features = false, features = [
 ] }
 npyz = { version = "0.9", features = ["npz"] }
 chrono = "0.4"
+proptest = "1"
 
 [[bench]]
 harness = false

@@ -26,13 +26,6 @@ const SENTINEL: u32 = u32::MAX;
 /// Slack fraction.
 const SLACK_FRACTION: f64 = 0.03;
 
-/// Capacity of the traversal stack. A root-to-leaf path crosses at most `BITS` internal cells (a
-/// child's level is strictly greater than its parent's), and each pushes at most `2^D - 1`
-/// unvisited siblings, so the live stack never exceeds `BITS * (2^D - 1)` plus one final fan-out.
-/// That is 96 at `D = 2` (32 bits) and 147 at `D = 3` (21 bits), so 256 holds both with margin.
-/// Kept fixed and stack-allocated so the repulsive traversal never touches the heap.
-pub(crate) const STACK_CAP: usize = 256;
-
 /// One cell of the arena. The Barnes-Hut traversal reads `center_of_mass`, `count`, and `level`
 /// (which sizes the cell through the per-tree half-width table), and follows `first_child` for the
 /// `child_count` children stored contiguously. A leaf is marked by `first_child == SENTINEL`.
@@ -49,7 +42,7 @@ struct Node<T, const D: usize> {
     level: u8,
 }
 
-/// A Morton linear quadtree (`D == 2`) or octree (`D == 3`) over the embedding, in one arena.
+/// A Morton linear quadtree (`D == 2`), octree (`D == 3`), or 16-cell tree (`D == 4`) over the embedding, in one arena.
 #[derive(Debug)]
 pub(crate) struct Arena<T, const D: usize> {
     nodes: Vec<Node<T, D>>,
@@ -331,7 +324,7 @@ where
 
     /// Accumulates the non-edge (repulsive) Barnes-Hut forces on point `index` into
     /// `negative_forces_row` and the normalization term `q_sum`. Iterative traversal over the arena
-    /// using `stack` as reusable scratch, a slice of at least [`STACK_CAP`] entries.
+    /// using `stack` as reusable scratch, a mutable slice of [`morton::Morton::Stack`].
     ///
     /// A node is summarized by its center of mass when it is a leaf or passes the theta test, and
     /// otherwise its children are pushed. The leaf holding the query's own point has zero distance
@@ -351,9 +344,8 @@ where
         }
         let (y_chunks, _) = y.as_chunks::<D>();
         let query = &y_chunks[index];
-
-        // Explicit stack with a local top cursor over `stack`, which holds at most `STACK_CAP`
-        // entries (see its bound). No heap allocation occurs on this hot path.
+        // Explicit stack with a local top cursor over `stack`, sized per dimensionality by
+        // `Morton::Stack`. No heap allocation occurs on this hot path.
         let mut top = 0usize;
         stack[top] = 0;
         top += 1;
@@ -566,7 +558,7 @@ mod tests {
         assert_eq!(arena.root_count(), 0);
         let mut forces = [0.0f32; 2];
         let mut q_sum = 0.0f32;
-        let mut stack = [0u32; STACK_CAP];
+        let mut stack = <Dim<2> as Morton<2>>::empty_stack();
         arena.compute_non_edge_forces(0, 0.25, &[], &mut forces, &mut q_sum, &mut stack);
         assert_eq!(forces, [0.0, 0.0]);
         assert_eq!(q_sum, 0.0);

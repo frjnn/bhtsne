@@ -119,7 +119,7 @@ where
                     (
                         [T::zero(); D],
                         [T::zero(); D],
-                        [0u32; tsne::arena::STACK_CAP],
+                        <tsne::morton::Dim<D> as tsne::morton::Morton<D>>::empty_stack(),
                     )
                 },
                 |(edge_row, nonedge_row, stack),
@@ -137,7 +137,7 @@ where
                         y,
                         nonedge_row,
                         &mut q_sum,
-                        stack,
+                        stack.as_mut(),
                     );
                     positive_out.copy_from_slice(&edge_row[..]);
                     negative_out.copy_from_slice(&nonedge_row[..]);

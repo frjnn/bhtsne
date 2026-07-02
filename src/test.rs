@@ -1896,3 +1896,21 @@ fn fit_sne_with_neighbors_rejects_out_of_range_index() {
         .epochs(1)
         .fit_sne_with_neighbors(&neighbors);
 }
+
+/// Smoke test for the 4D Barnes-Hut path: the embedding stays finite and correctly sized
+/// after a short fit.
+#[test]
+fn barnes_hut_runs_in_four_dimensions() {
+    const N: usize = 200;
+    const DIN: usize = 5;
+
+    let data = lcg_samples(N, DIN, 42);
+    let samples: Vec<&[f32]> = data.chunks(DIN).collect();
+    let mut tsne: tSNE<f32, &[f32], 4> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * 4);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}

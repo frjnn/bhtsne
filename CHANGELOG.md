@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.10
+
+Add 4D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 4 (in addition to 2 and 3). The Morton codec uses 16 bits per axis at `D = 4`, so points closer than `1 / 65536` of the bounding-box width on any axis collapse into the same leaf cell.
+
 ## 0.7.4
 
 Add `tSNE::fit_sne` and `tSNE::fit_sne_with_neighbors`, an FFT-accelerated, interpolation-based fitting path (the FIt-SNE method of Linderman et al., 2019, the same algorithm openTSNE defaults to). It builds the sparse affinity graph exactly as `barnes_hut` does, sharing the vantage point tree, the per-point Gaussian bandwidth search, the symmetrization, and the affinity cache, but approximates the repulsive forces in `O(n)` per epoch on a coarse equispaced grid rather than over a space-partitioning tree, and carries no `theta` accuracy knob. The repulsive force and the `Q` normalizer are both recovered from one convolution with the squared Cauchy kernel via the `D + 2` term identity (charges `[1, y_1, ..., y_D, ||y||^2]`), matching openTSNE's formulation. Both produce the `negative_forces` and `Z` the Barnes-Hut loop expects, so the two repulsion strategies feed the very same fused gradient-descent update, which is now factored into a shared `gradient_descent_step`; the affinity construction is shared through a `build_affinities` helper.
