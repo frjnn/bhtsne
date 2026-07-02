@@ -31,16 +31,17 @@ impl Morton<2> for Dim<2> {
     const CHILDREN: usize = 4;
     const BITS: u32 = 32;
     type Stack = [u32; 128];
+    type Word = u64;
 
     fn empty_stack() -> Self::Stack {
         [0u32; 128]
     }
 
-    fn encode([c0, c1]: [u32; 2]) -> u64 {
+    fn encode([c0, c1]: [u32; 2]) -> Self::Word {
         part_1by1(c0 as u64) | (part_1by1(c1 as u64) << 1)
     }
 
-    fn decode(code: u64) -> [u32; 2] {
+    fn decode(code: Self::Word) -> [u32; 2] {
         [compact_1by1(code) as u32, compact_1by1(code >> 1) as u32]
     }
 }
