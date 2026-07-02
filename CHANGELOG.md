@@ -2,7 +2,7 @@
 
 ## 0.7.11
 
-Add 5D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 5 (in addition to 2, 3, and 4). The Morton codec uses 25 bits per axis at `D = 5`, with a `u128` Z-order code (125 bits used), so points closer than `1 / 33554432` of the bounding-box width on any axis collapse into the same leaf cell.
+Add 5D and 6D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 5 or 6 (in addition to 2, 3, and 4). The Morton codec uses 25 bits per axis at `D = 5` (125 bits, `u128` code) and 21 bits per axis at `D = 6` (126 bits, `u128` code).
 
 ## 0.7.10
 Add 4D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 4 (in addition to 2 and 3). The Morton codec uses 16 bits per axis at `D = 4`, so points closer than `1 / 65536` of the bounding-box width on any axis collapse into the same leaf cell.

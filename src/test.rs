@@ -1959,3 +1959,30 @@ fn barnes_hut_runs_in_five_dimensions() {
     assert_eq!(embedding.len(), N * 5);
     assert!(embedding.iter().all(|v| v.is_finite()));
 }
+
+/// Smoke test for the 6D Barnes-Hut path: the embedding stays finite and correctly sized
+/// after a short fit.
+#[test]
+fn barnes_hut_runs_in_six_dimensions() {
+    const N: usize = 200;
+    const DIN: usize = 7;
+
+    let data = lcg_samples(N, DIN, 45);
+    let samples: Vec<&[f32]> = data.chunks(DIN).collect();
+    let mut tsne: tSNE<f32, &[f32], 6> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * 6);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}
+
+/// Verify the 6D Morton codec and arena path compile and function correctly.
+#[test]
+fn arena_builds_6d() {
+    const N: usize = 500;
+    let data = lcg_samples(N, 6, 46);
+    let arena = tsne::arena::Arena::<f32, u128, 6>::new(&data, N);
+    assert_eq!(arena.root_count(), N);
+}
