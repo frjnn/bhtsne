@@ -48,17 +48,16 @@ pub trait SpectralBlock: sealed::Sealed {
     /// `SPECTRAL_OVERSAMPLE` of 8.
     const WIDTH: usize;
 
-    /// A block row, concretely `[T; D + 8]`.
-    type Row<T: Float + Send + Sync>: AsRef<[T]> + AsMut<[T]> + Send + Sync;
-
-    /// A zeroed row, the accumulator seed of the fused kernel.
-    fn zero_row<T: Float + Send + Sync>() -> Self::Row<T>;
+    /// A block row, concretely `[T; D + 8]`. The `Default` value is the zeroed
+    /// row seeding the fused kernel's accumulator, well within the 32 elements
+    /// for which arrays implement `Default`.
+    type Row<T: Float + Default + Send + Sync>: AsRef<[T]> + AsMut<[T]> + Default + Send + Sync;
 
     /// Views a flat row-major block as typed rows.
-    fn as_rows<T: Float + Send + Sync>(flat: &[T]) -> &[Self::Row<T>];
+    fn as_rows<T: Float + Default + Send + Sync>(flat: &[T]) -> &[Self::Row<T>];
 
     /// Views a flat row-major mutable block as typed rows.
-    fn as_rows_mut<T: Float + Send + Sync>(flat: &mut [T]) -> &mut [Self::Row<T>];
+    fn as_rows_mut<T: Float + Default + Send + Sync>(flat: &mut [T]) -> &mut [Self::Row<T>];
 }
 
 macro_rules! spectral_block {
@@ -71,20 +70,15 @@ macro_rules! spectral_block {
         impl SpectralBlock for Dim<$dim> {
             const WIDTH: usize = $width;
 
-            type Row<T: Float + Send + Sync> = [T; $width];
+            type Row<T: Float + Default + Send + Sync> = [T; $width];
 
             #[inline]
-            fn zero_row<T: Float + Send + Sync>() -> [T; $width] {
-                [T::zero(); $width]
-            }
-
-            #[inline]
-            fn as_rows<T: Float + Send + Sync>(flat: &[T]) -> &[[T; $width]] {
+            fn as_rows<T: Float + Default + Send + Sync>(flat: &[T]) -> &[[T; $width]] {
                 flat.as_chunks::<$width>().0
             }
 
             #[inline]
-            fn as_rows_mut<T: Float + Send + Sync>(flat: &mut [T]) -> &mut [[T; $width]] {
+            fn as_rows_mut<T: Float + Default + Send + Sync>(flat: &mut [T]) -> &mut [[T; $width]] {
                 flat.as_chunks_mut::<$width>().0
             }
         }
@@ -231,7 +225,7 @@ pub(crate) fn spectral_embedding<T, const D: usize>(
     params: SpectralParams,
 ) -> Vec<T>
 where
-    T: Float + Sum + AddAssign + SubAssign + MulAssign + DivAssign + Send + Sync,
+    T: Float + Default + Sum + AddAssign + SubAssign + MulAssign + DivAssign + Send + Sync,
     Dim<D>: SpectralBlock,
 {
     let d_out = D;
@@ -388,7 +382,7 @@ fn chebyshev_rayleigh_ritz<T, S>(
     params: SpectralParams,
 ) -> Vec<T>
 where
-    T: Float + Sum + AddAssign + SubAssign + DivAssign + Send + Sync,
+    T: Float + Default + Sum + AddAssign + SubAssign + DivAssign + Send + Sync,
     S: SpectralBlock,
 {
     // The rotation after the round loop reads the Ritz decomposition of the last
@@ -624,7 +618,7 @@ fn matvec_combine<T, S>(
     mul_v: T,
     mul_prev: T,
 ) where
-    T: Float + AddAssign + Send + Sync,
+    T: Float + Default + AddAssign + Send + Sync,
     S: SpectralBlock,
 {
     let half = T::from(0.5).unwrap();
@@ -635,7 +629,7 @@ fn matvec_combine<T, S>(
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, out_row)| {
-            let mut acc = S::zero_row::<T>();
+            let mut acc = <S::Row<T>>::default();
             let acc = acc.as_mut();
             for e in p_rows[i]..p_rows[i + 1] {
                 let j = edge_cols[e];

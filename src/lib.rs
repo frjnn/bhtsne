@@ -459,6 +459,7 @@ where
     /// [`spectral_init_with`]: tSNE::spectral_init_with
     pub fn spectral_init(&mut self) -> &mut Self
     where
+        T: Default,
         Dim<D>: SpectralBlock,
     {
         self.spectral_init_with(SpectralParams::default())
@@ -486,6 +487,7 @@ where
     /// [`initial_embedding`]: tSNE::initial_embedding
     pub fn spectral_init_with(&mut self, params: SpectralParams) -> &mut Self
     where
+        T: Default,
         Dim<D>: SpectralBlock,
     {
         self.spectral_init = Some((params, tsne::spectral::spectral_embedding::<T, D>));
@@ -1122,6 +1124,7 @@ where
     /// [`with_affinities`]: tSNE::with_affinities
     pub fn spectral_embedding(&self) -> Vec<T>
     where
+        T: Default,
         Dim<D>: SpectralBlock,
     {
         self.spectral_embedding_with(SpectralParams::default())
@@ -1132,6 +1135,7 @@ where
     /// [`spectral_embedding`]: tSNE::spectral_embedding
     pub fn spectral_embedding_with(&self, params: SpectralParams) -> Vec<T>
     where
+        T: Default,
         Dim<D>: SpectralBlock,
     {
         tsne::spectral::spectral_embedding::<T, D>(
