@@ -1986,3 +1986,29 @@ fn arena_builds_6d() {
     let arena = tsne::arena::Arena::<f32, u128, 6>::new(&data, N);
     assert_eq!(arena.root_count(), N);
 }
+
+/// Verify the 7D Morton codec and arena path compile and function correctly.
+#[test]
+fn barnes_hut_runs_in_seven_dimensions() {
+    const N: usize = 200;
+    const DIN: usize = 8;
+
+    let data = lcg_samples(N, DIN, 46);
+    let samples: Vec<&[f32]> = data.chunks(DIN).collect();
+    let mut tsne: tSNE<f32, &[f32], 7> = tSNE::new(&samples);
+    tsne.perplexity(PERPLEXITY)
+        .epochs(50)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne.embedding();
+    assert_eq!(embedding.len(), N * 7);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+}
+
+/// Verify the 7D Morton codec and arena path compile and function correctly.
+#[test]
+fn arena_builds_7d() {
+    const N: usize = 500;
+    let data = lcg_samples(N, 7, 47);
+    let arena = tsne::arena::Arena::<f32, u128, 7>::new(&data, N);
+    assert_eq!(arena.root_count(), N);
+}

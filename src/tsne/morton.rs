@@ -2,9 +2,9 @@
 //!
 //! The arena encodes each embedding point as a single Morton code: the per-axis quantized
 //! coordinates are bit-interleaved so that sorting the codes lays the points out in Z-order, where
-//! points sharing a code prefix share a tree cell. `D in {2, 3, 4, 5, 6}` are supported, with 32
+//! points sharing a code prefix share a tree cell. `D in {2, 3, 4, 5, 6, 7}` are supported, with 32
 //! bits per axis at `D = 2` (lossless for `f32`), 21 bits at `D = 3`, 16 bits at `D = 4`, 25
-//! bits at `D = 5`, and 21 bits at `D = 6`. The [`Morton`] trait is implemented for those five
+//! bits at `D = 5`, 21 bits at `D = 6`, and 18 bits at `D = 7`. The [`Morton`] trait is implemented for those six
 //! dimensions, so the bound `Dim<D>: Morton<D>` is what restricts the Barnes-Hut tree path at
 //! compile time.
 
@@ -13,6 +13,7 @@ mod d3;
 mod d4;
 mod d5;
 mod d6;
+mod d7;
 
 use num_traits::Float;
 
@@ -64,7 +65,7 @@ impl MortonWord for u128 {
     }
 }
 
-/// Per-dimension Z-order codec, implemented for [`Dim<2>`], [`Dim<3>`], [`Dim<4>`], [`Dim<5>`], and [`Dim<6>`].
+/// Per-dimension Z-order codec, implemented for [`Dim<2>`], [`Dim<3>`], [`Dim<4>`], [`Dim<5>`], [`Dim<6>`], and [`Dim<7>`].
 pub trait Morton<const D: usize> {
     /// Number of children a fully occupied internal cell can have, `2^D`.
     const CHILDREN: usize;
