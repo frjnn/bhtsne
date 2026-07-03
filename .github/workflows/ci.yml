@@ -33,7 +33,9 @@ jobs:
       - name: Run tests
         run: cargo test --all-features -- --include-ignored
       - name: Smoke-test benchmarks
-        run: cargo bench --bench affinities -- --test
+        run: |
+          cargo bench --bench affinities -- --test
+          cargo bench --bench spectral_init -- --test
 
   wasm:
     name: Wasm targets

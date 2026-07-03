@@ -69,6 +69,7 @@ pub fn euclidean<T: Scalar>(a: &[T], b: &[T]) -> T {
 
 /// Exact k nearest neighbors per sample, ascending distance, excluding self.
 /// Built once, outside the timed section.
+#[allow(dead_code)]
 pub fn brute_force_neighbors<T: Scalar>(samples: &[&[T]], k: usize) -> Vec<Vec<Neighbor<T>>> {
     (0..samples.len())
         .map(|i| {

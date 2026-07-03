@@ -76,3 +76,7 @@ name = "affinities"
 [[bench]]
 harness = false
 name = "tsne"
+
+[[bench]]
+harness = false
+name = "spectral_init"
