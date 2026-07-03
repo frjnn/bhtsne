@@ -289,7 +289,6 @@ where
     // 5. Leading nontrivial eigenvectors, flat row-major n x d_out.
     let mut v = chebyshev_rayleigh_ritz::<T, Dim<D>>(
         n,
-        d_out,
         &v0,
         &inv_sqrt_d,
         p_rows,
@@ -373,7 +372,6 @@ where
 #[allow(clippy::too_many_arguments)]
 fn chebyshev_rayleigh_ritz<T, S>(
     n: usize,
-    d_out: usize,
     v0: &[T],
     inv_sqrt_d: &[T],
     p_rows: &[usize],
@@ -397,8 +395,11 @@ where
 
     // The block width is fixed at the type level. On graphs with fewer than k
     // independent directions the surplus columns collapse during orthonormalization,
-    // are refreshed once, and end up zeroed, so no runtime clamp is needed.
+    // are refreshed once, and end up zeroed, so no runtime clamp is needed. The
+    // output dimensionality follows from the same width, upheld by the const
+    // asserts of the spectral_block macro.
     let k = S::WIDTH;
+    let d_out = S::WIDTH - SPECTRAL_OVERSAMPLE;
 
     let zero = T::zero();
     let one = T::one();
