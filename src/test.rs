@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use rand::Rng;
 
-use super::{Neighbor, tSNE, tsne};
+use super::{Neighbor, SparseAffinities, SpectralParams, tSNE, tsne};
 
 const D: usize = 4;
 const THETA: f32 = 0.5;
@@ -2011,4 +2011,551 @@ fn arena_builds_7d() {
     let data = lcg_samples(N, 7, 47);
     let arena = tsne::arena::Arena::<f32, u128, 7>::new(&data, N);
     assert_eq!(arena.root_count(), N);
+}
+
+/// Build a two-block CSR affinity graph: two cliques of `half` nodes joined by a
+/// single weak edge between node 0 and node `half`. The first nontrivial
+/// eigenvector must separate the two blocks by sign.
+fn two_block_affinities(half: usize) -> SparseAffinities<f32> {
+    let n = half * 2;
+    let mut rows: Vec<usize> = Vec::with_capacity(n + 1);
+    let mut columns: Vec<u32> = Vec::new();
+    let mut values: Vec<f32> = Vec::new();
+
+    rows.push(0);
+    for i in 0..n {
+        if i == 0 {
+            // Clique edges plus the weak bridge.
+            for j in 1..half {
+                columns.push(j as u32);
+                values.push(1.0);
+            }
+            columns.push(half as u32);
+            values.push(0.01);
+        } else if i == half {
+            // Weak bridge back to node 0 plus clique edges.
+            columns.push(0);
+            values.push(0.01);
+            for j in (half + 1)..n {
+                columns.push(j as u32);
+                values.push(1.0);
+            }
+        } else if i < half {
+            // Clique edges (skip self and node 0 which is already done).
+            for j in 0..half {
+                if j != i {
+                    columns.push(j as u32);
+                    values.push(1.0);
+                }
+            }
+        } else {
+            // Second clique (skip self and node half which is already done).
+            for j in half..n {
+                if j != i {
+                    columns.push(j as u32);
+                    values.push(1.0);
+                }
+            }
+        }
+        rows.push(columns.len());
+    }
+
+    SparseAffinities {
+        rows,
+        columns,
+        values,
+        perplexity: 5.0,
+    }
+}
+
+#[test]
+fn spectral_init_separates_two_blocks() {
+    const HALF: usize = 20;
+    let affinities = two_block_affinities(HALF);
+    let n = HALF * 2;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 1> = tSNE::new(&samples);
+    tsne.with_affinities(affinities);
+    let seed = tsne.spectral_embedding();
+
+    let first_half_positive = seed[..HALF].iter().filter(|&&v| v > 0.0).count();
+    let first_half_negative = seed[..HALF].iter().filter(|&&v| v < 0.0).count();
+    let second_half_positive = seed[HALF..].iter().filter(|&&v| v > 0.0).count();
+    let second_half_negative = seed[HALF..].iter().filter(|&&v| v < 0.0).count();
+
+    let first_dominant = first_half_positive > first_half_negative;
+    let second_dominant = second_half_positive > second_half_negative;
+    assert!(
+        first_dominant != second_dominant,
+        "spectral init did not separate blocks: first half {{pos: {}, neg: {}}}, second half {{pos: {}, neg: {}}}",
+        first_half_positive,
+        first_half_negative,
+        second_half_positive,
+        second_half_negative
+    );
+}
+
+#[test]
+fn spectral_init_is_deterministic() {
+    let affinities = two_block_affinities(15);
+    let n = 30;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne_a: tSNE<f32, &[f32], 3> = tSNE::new(&samples);
+    tsne_a.with_affinities(affinities.clone());
+    let seed_a = tsne_a.spectral_embedding();
+
+    let mut tsne_b: tSNE<f32, &[f32], 3> = tSNE::new(&samples);
+    tsne_b.with_affinities(affinities);
+    let seed_b = tsne_b.spectral_embedding();
+
+    assert_eq!(seed_a, seed_b, "spectral init is not deterministic");
+}
+
+#[test]
+fn spectral_init_shape_and_finiteness() {
+    let affinities = two_block_affinities(10);
+    let n = 20;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    {
+        let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+        tsne.with_affinities(affinities.clone());
+        let seed = tsne.spectral_embedding();
+        assert_eq!(seed.len(), n * 2);
+        assert!(seed.iter().all(|v| v.is_finite()));
+    }
+    {
+        let mut tsne: tSNE<f32, &[f32], 4> = tSNE::new(&samples);
+        tsne.with_affinities(affinities.clone());
+        let seed = tsne.spectral_embedding();
+        assert_eq!(seed.len(), n * 4);
+        assert!(seed.iter().all(|v| v.is_finite()));
+    }
+    {
+        let mut tsne: tSNE<f32, &[f32], 7> = tSNE::new(&samples);
+        tsne.with_affinities(affinities);
+        let seed = tsne.spectral_embedding();
+        assert_eq!(seed.len(), n * 7);
+        assert!(seed.iter().all(|v| v.is_finite()));
+    }
+}
+
+#[test]
+fn spectral_init_scale_matches_random_init() {
+    let affinities = two_block_affinities(15);
+    let n = 30;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    tsne.with_affinities(affinities);
+    let seed = tsne.spectral_embedding();
+
+    let col0: Vec<f32> = (0..n).map(|i| seed[i * 2]).collect();
+    let mean: f32 = col0.iter().sum::<f32>() / n as f32;
+    let variance: f32 = col0.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n as f32;
+    let std = variance.sqrt();
+
+    assert!(
+        (std - 1e-4).abs() < 1e-6,
+        "first column std is {std}, expected ~1e-4"
+    );
+}
+
+/// SparseAffinities with some isolated nodes (degree 0) to exercise the floor path.
+fn affinities_with_isolated_nodes() -> SparseAffinities<f32> {
+    let n = 6;
+    let mut rows = vec![0usize; n + 1];
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+
+    for i in 0..3 {
+        for j in 0..3 {
+            if i != j {
+                columns.push(j as u32);
+                values.push(1.0);
+            }
+        }
+        rows[i + 1] = columns.len();
+    }
+    for i in 3..5 {
+        for j in 3..5 {
+            if i != j {
+                columns.push(j as u32);
+                values.push(1.0);
+            }
+        }
+        rows[i + 1] = columns.len();
+    }
+    rows[6] = columns.len();
+
+    SparseAffinities {
+        rows,
+        columns,
+        values,
+        perplexity: 2.0,
+    }
+}
+
+#[test]
+fn spectral_init_handles_isolated_nodes() {
+    let affinities = affinities_with_isolated_nodes();
+    let n = 6;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    tsne.with_affinities(affinities);
+    let seed = tsne.spectral_embedding();
+    assert_eq!(seed.len(), n * 2);
+    assert!(
+        seed.iter().all(|v| v.is_finite()),
+        "spectral init with isolated nodes produced non-finite values"
+    );
+}
+
+#[test]
+fn spectral_init_through_initial_embedding_reduces_kl() {
+    const N: usize = 30;
+    let data = lcg_samples(N, D, 42);
+    let samples: Vec<&[f32]> = data.chunks(D).collect();
+
+    let mut tsne1: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    tsne1
+        .perplexity(5.0)
+        .epochs(100)
+        .barnes_hut(THETA, |a, b| euclidean(a, b));
+
+    let seed = tsne1.spectral_embedding();
+    assert_eq!(seed.len(), N * 2);
+
+    tsne1.perplexity(5.0).epochs(50).initial_embedding(seed);
+    tsne1.barnes_hut(THETA, |a, b| euclidean(a, b));
+    let embedding = tsne1.embedding();
+
+    assert_eq!(embedding.len(), N * 2);
+    assert!(embedding.iter().all(|v| v.is_finite()));
+    assert!(
+        tsne1
+            .kl_divergence()
+            .expect("spectral fit should have KL")
+            .is_finite()
+    );
+}
+
+#[test]
+fn spectral_init_via_builder_separates_blocks() {
+    const HALF: usize = 20;
+    let affinities = two_block_affinities(HALF);
+    let n = HALF * 2;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    // Use the builder method instead of manual spectral_embedding + initial_embedding.
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    tsne.with_affinities(affinities).spectral_init();
+    // Trigger finalize_p_and_seed without gradient epochs, so the embedding is
+    // exactly the spectral seed. The auto learning rate dwarfs the 1e-4 seed
+    // scale, so a single epoch moves points orders of magnitude and any sign
+    // based check would then test the gradient dynamics instead of the seeding.
+    tsne.epochs(0).barnes_hut(0.5, |_, _| 0.0);
+    let embedding = tsne.embedding();
+    // Check the first column (column 0) for block separation.
+    let col0: Vec<f32> = embedding.iter().step_by(2).cloned().collect();
+    let first_half_positive = col0[..HALF].iter().filter(|&&v| v > 0.0).count();
+    let first_half_negative = col0[..HALF].iter().filter(|&&v| v < 0.0).count();
+    let second_half_positive = col0[HALF..].iter().filter(|&&v| v > 0.0).count();
+    let second_half_negative = col0[HALF..].iter().filter(|&&v| v < 0.0).count();
+
+    let first_dominant = first_half_positive > first_half_negative;
+    let second_dominant = second_half_positive > second_half_negative;
+    assert!(
+        first_dominant != second_dominant,
+        "spectral init via builder did not separate blocks"
+    );
+}
+
+#[test]
+fn explicit_initial_embedding_overrides_spectral_init() {
+    const HALF: usize = 20;
+    let affinities = two_block_affinities(HALF);
+    let n = HALF * 2;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    // Set both spectral_init flag and explicit embedding; explicit wins.
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    let explicit: Vec<f32> = (0..n * 2).map(|i| i as f32 * 0.001).collect();
+    tsne.with_affinities(affinities)
+        .spectral_init()
+        .initial_embedding(explicit.clone());
+    tsne.epochs(0).barnes_hut(0.5, |_, _| 0.0);
+    let embedding = tsne.embedding();
+
+    // The embedding should match the explicit seed (epochs=0 means no updates).
+    assert_eq!(embedding, explicit);
+}
+
+#[test]
+fn spectral_init_with_custom_params_separates_blocks() {
+    const HALF: usize = 20;
+    let affinities = two_block_affinities(HALF);
+    let n = HALF * 2;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 1> = tSNE::new(&samples);
+    tsne.with_affinities(affinities);
+    // A cheaper budget than the defaults must still resolve this easy spectrum.
+    let params = SpectralParams::new().rounds(3).degree(10).oversample(4);
+    let seed = tsne.spectral_embedding_with(params);
+
+    let first_half_positive = seed[..HALF].iter().filter(|&&v| v > 0.0).count();
+    let second_half_positive = seed[HALF..].iter().filter(|&&v| v > 0.0).count();
+    let first_dominant = first_half_positive > HALF / 2;
+    let second_dominant = second_half_positive > HALF / 2;
+    assert!(
+        first_dominant != second_dominant,
+        "custom-parameter spectral init did not separate blocks"
+    );
+
+    // Custom parameters must be as deterministic as the defaults.
+    assert_eq!(seed, tsne.spectral_embedding_with(params));
+    // And produce a different solve than the defaults.
+    assert_ne!(seed, tsne.spectral_embedding());
+}
+
+#[test]
+fn spectral_init_with_custom_seed_std_scales_columns() {
+    let affinities = two_block_affinities(15);
+    let n = 30;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    tsne.with_affinities(affinities);
+    let seed = tsne.spectral_embedding_with(SpectralParams::new().seed_std(2e-3));
+
+    let col0: Vec<f32> = (0..n).map(|i| seed[i * 2]).collect();
+    let mean: f32 = col0.iter().sum::<f32>() / n as f32;
+    let variance: f32 = col0.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n as f32;
+    let std = variance.sqrt();
+
+    assert!(
+        (std - 2e-3).abs() < 2e-5,
+        "first column std is {std}, expected ~2e-3"
+    );
+}
+
+#[test]
+fn spectral_init_with_flows_through_builder() {
+    const HALF: usize = 20;
+    let affinities = two_block_affinities(HALF);
+    let n = HALF * 2;
+    let data: Vec<f32> = vec![0.0; n];
+    let samples: Vec<&[f32]> = data.chunks(1).collect();
+
+    let mut tsne: tSNE<f32, &[f32], 2> = tSNE::new(&samples);
+    tsne.with_affinities(affinities)
+        .spectral_init_with(SpectralParams::new().seed_std(5e-3));
+    tsne.epochs(0).barnes_hut(0.5, |_, _| 0.0);
+    let embedding = tsne.embedding();
+
+    // The custom seed scale must reach the seeding, proving the parameters flowed
+    // through the builder into finalize_p_and_seed.
+    let col0: Vec<f32> = embedding.iter().step_by(2).cloned().collect();
+    let mean: f32 = col0.iter().sum::<f32>() / n as f32;
+    let variance: f32 = col0.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n as f32;
+    let std = variance.sqrt();
+    assert!(
+        (std - 5e-3).abs() < 5e-5,
+        "first column std is {std}, expected ~5e-3"
+    );
+}
+
+#[test]
+#[should_panic(expected = "at least one spectral solver round")]
+fn spectral_params_reject_zero_rounds() {
+    let _ = SpectralParams::new().rounds(0);
+}
+
+#[test]
+#[should_panic(expected = "Chebyshev filter degree")]
+fn spectral_params_reject_zero_degree() {
+    let _ = SpectralParams::new().degree(0);
+}
+
+#[test]
+#[should_panic(expected = "seed standard deviation")]
+fn spectral_params_reject_nonpositive_seed_std() {
+    let _ = SpectralParams::new().seed_std(0.0);
+}
+
+/// Property tests of the spectral embedding contract on arbitrary graphs.
+mod spectral_properties {
+    use proptest::prelude::*;
+
+    use super::super::tsne::spectral::{SpectralParams, spectral_embedding};
+
+    /// Builds a symmetric CSR affinity graph from an arbitrary edge list,
+    /// accumulating duplicate pairs and dropping self loops. Nodes untouched by any
+    /// edge remain isolated, which is a legal (and interesting) input.
+    fn symmetric_csr(n: usize, edges: &[(usize, usize, f32)]) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
+        let mut weights = vec![0.0f32; n * n];
+        for &(a, b, weight) in edges {
+            let (i, j) = (a % n, b % n);
+            if i == j {
+                continue;
+            }
+            weights[i * n + j] += weight;
+            weights[j * n + i] += weight;
+        }
+        let mut rows = vec![0usize];
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                if weights[i * n + j] > 0.0 {
+                    columns.push(j as u32);
+                    values.push(weights[i * n + j]);
+                }
+            }
+            rows.push(columns.len());
+        }
+        (rows, columns, values)
+    }
+
+    /// Two cliques of the given sizes and internal weights with no edge between
+    /// them.
+    fn two_clique_csr(
+        size_a: usize,
+        size_b: usize,
+        w_a: f32,
+        w_b: f32,
+    ) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
+        let n = size_a + size_b;
+        let mut edges = Vec::new();
+        for i in 0..size_a {
+            for j in (i + 1)..size_a {
+                edges.push((i, j, w_a));
+            }
+        }
+        for i in size_a..n {
+            for j in (i + 1)..n {
+                edges.push((i, j, w_b));
+            }
+        }
+        symmetric_csr(n, &edges)
+    }
+
+    proptest::proptest! {
+        /// On any symmetric affinity graph the embedding has the right shape, is
+        /// finite, has zero-mean columns scaled to the target std (or exactly
+        /// degenerate ones), and is bit-for-bit deterministic.
+        #[test]
+        fn embedding_contract_holds_on_arbitrary_graphs(
+            (n, edges, d_out) in (1usize..=40).prop_flat_map(|n| {
+                (
+                    Just(n),
+                    proptest::collection::vec((0..n, 0..n, 0.01f32..10.0), 0..4 * n),
+                    1usize..=4,
+                )
+            }),
+        ) {
+            let (rows, columns, values) = symmetric_csr(n, &edges);
+            let params = SpectralParams::default();
+            let embedding = spectral_embedding(&rows, &columns, &values, d_out, params);
+
+            prop_assert_eq!(embedding.len(), n * d_out);
+            prop_assert!(embedding.iter().all(|v| v.is_finite()));
+
+            for d in 0..d_out {
+                let column: Vec<f32> = (0..n).map(|i| embedding[i * d_out + d]).collect();
+                let mean = column.iter().sum::<f32>() / n as f32;
+                // The bound assumes this generator's weight range (0.01 to 10),
+                // which caps the degree ratios that amplify the rescaled centering
+                // residue. Re-derive it before widening the weights.
+                prop_assert!(mean.abs() < 5e-6, "column {d} mean {mean} is not ~0");
+                let std = (column.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>()
+                    / n as f32)
+                    .sqrt();
+                // Degenerate columns keep their pre-scale std, at most 1e-30 by the
+                // scaling guard, so the branch cutoff can sit far below the target.
+                prop_assert!(
+                    std < 1e-25 || (std - 1e-4).abs() < 2e-6,
+                    "column {d} std {std} is neither ~1e-4 nor degenerate"
+                );
+            }
+
+            let again = spectral_embedding(&rows, &columns, &values, d_out, params);
+            prop_assert_eq!(embedding, again);
+        }
+
+        /// Two disconnected cliques of arbitrary sizes and weights must be strictly
+        /// separated by sign in the first embedding column, since the component
+        /// contrast vector is an exact eigenvector of the graph.
+        #[test]
+        fn embedding_separates_disconnected_cliques(
+            size_a in 3usize..=20,
+            size_b in 3usize..=20,
+            w_a in 0.05f32..5.0,
+            w_b in 0.05f32..5.0,
+        ) {
+            let (rows, columns, values) = two_clique_csr(size_a, size_b, w_a, w_b);
+            let embedding =
+                spectral_embedding(&rows, &columns, &values, 1, SpectralParams::default());
+
+            let sign_a = embedding[0] > 0.0;
+            prop_assert!(
+                embedding[..size_a].iter().all(|&v| (v > 0.0) == sign_a && v != 0.0),
+                "first clique is not on one strict side of zero"
+            );
+            prop_assert!(
+                embedding[size_a..].iter().all(|&v| (v > 0.0) != sign_a && v != 0.0),
+                "second clique is not strictly on the opposite side"
+            );
+        }
+
+        /// The output contract must hold for every valid parameter combination, and
+        /// the column scale must follow the requested seed_std.
+        #[test]
+        fn embedding_contract_holds_for_any_params(
+            rounds in 1usize..=6,
+            degree in 1usize..=25,
+            oversample in 0usize..=12,
+            seed_std in 1e-6f64..1e-2,
+        ) {
+            let (rows, columns, values) = two_clique_csr(12, 9, 1.0, 0.5);
+            let n = 21;
+            let params = SpectralParams::new()
+                .rounds(rounds)
+                .degree(degree)
+                .oversample(oversample)
+                .seed_std(seed_std);
+            let embedding = spectral_embedding(&rows, &columns, &values, 2, params);
+
+            prop_assert_eq!(embedding.len(), n * 2);
+            prop_assert!(embedding.iter().all(|v: &f32| v.is_finite()));
+            for d in 0..2 {
+                let column: Vec<f32> = (0..n).map(|i| embedding[i * 2 + d]).collect();
+                let mean = column.iter().sum::<f32>() / n as f32;
+                let std = (column.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>()
+                    / n as f32)
+                    .sqrt();
+                let target = seed_std as f32;
+                prop_assert!(
+                    std < 1e-12 || (std - target).abs() < target * 0.02,
+                    "column {d} std {std} does not match requested {target}"
+                );
+            }
+
+            let again = spectral_embedding(&rows, &columns, &values, 2, params);
+            prop_assert_eq!(embedding, again);
+        }
+    }
 }

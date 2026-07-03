@@ -2,6 +2,7 @@ pub(super) mod arena;
 pub(super) mod fft;
 pub(super) mod interpolation;
 pub(super) mod morton;
+pub(super) mod spectral;
 pub(super) mod vptree;
 
 use std::{

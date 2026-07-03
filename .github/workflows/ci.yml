@@ -9,6 +9,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The property tests default to 256 cases each, sized for fast local release
+  # runs. Debug builds on the small CI runners need a lower budget, especially
+  # under tarpaulin instrumentation in the coverage job.
+  PROPTEST_CASES: 32
 
 jobs:
   test:
