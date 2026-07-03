@@ -121,6 +121,28 @@ pub struct SparseAffinities<T> {
     perplexity: T,
 }
 
+impl<T> SparseAffinities<T> {
+    /// Returns the row indices of the sparse affinity matrix.
+    pub fn rows(&self) -> &[usize] {
+        &self.rows
+    }
+
+    /// Returns the column indices of the sparse affinity matrix.
+    pub fn columns(&self) -> &[u32] {
+        &self.columns
+    }
+
+    /// Returns the affinity values.
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    /// Returns the perplexity used when building the affinities.
+    pub fn perplexity(&self) -> &T {
+        &self.perplexity
+    }
+}
+
 /// t-distributed stochastic neighbor embedding. Provides a parallel implementation of both the
 /// exact version of the algorithm and the tree accelerated one leveraging space partitioning trees.
 #[allow(non_camel_case_types)]
