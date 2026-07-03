@@ -478,11 +478,9 @@ where
     /// ```
     ///
     /// If an explicit [`initial_embedding`] is also set, it takes precedence and
-    /// this setting is ignored.
-    ///
-    /// The solver is monomorphized against the embedding dimensionality here, where
-    /// the [`SpectralBlock`] bound is available, and stored as a plain function
-    /// pointer so the seeding inside the fit needs no bound of its own.
+    /// this setting is ignored. The solver is monomorphized here, where the
+    /// [`SpectralBlock`] bound is available, so the seeding inside the fit needs no
+    /// bound of its own.
     ///
     /// [`initial_embedding`]: tSNE::initial_embedding
     pub fn spectral_init_with(&mut self, params: SpectralParams) -> &mut Self

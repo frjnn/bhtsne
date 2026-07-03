@@ -27,30 +27,25 @@ use rayon::{
 
 use super::morton::Dim;
 
-/// Prevents downstream implementations of [`SpectralBlock`], whose impls would be
-/// unusable anyway since the solver only accepts `Dim<D>`, keeping the trait free to
-/// evolve.
+/// Seals [`SpectralBlock`], keeping the trait free to evolve.
 mod sealed {
     pub trait Sealed {}
 }
 
 /// Fixed-width row storage of the spectral solver, in the spirit of the `Morton`
 /// associated types: each dimensionality names its concrete `[T; D + 8]` row type,
-/// which gives the solver compile-time block widths on stable Rust without const
-/// generic arithmetic. The fused kernel unrolls and vectorizes over these rows for
-/// slightly more than twice the throughput of an equivalent dynamic-width loop.
+/// giving the solver compile-time block widths on stable Rust. The fused kernel
+/// unrolls and vectorizes over these rows for about twice the throughput of a
+/// dynamic-width loop.
 ///
-/// Sealed, and implemented for [`Dim<D>`] up to `D = 7`, the highest dimensionality
-/// any fitting path supports. Extending the `spectral_block` invocation below adds
-/// further dimensionalities.
+/// Sealed, and implemented for [`Dim<D>`] up to `D = 7`, matching the highest
+/// Barnes-Hut dimensionality. The `spectral_block` invocation below extends it.
 pub trait SpectralBlock: sealed::Sealed {
-    /// Width of a block row, always the dimensionality plus the crate level
-    /// `SPECTRAL_OVERSAMPLE` of 8.
+    /// Width of a block row, the dimensionality plus the oversampling of 8.
     const WIDTH: usize;
 
-    /// A block row, concretely `[T; D + 8]`. The `Default` value is the zeroed
-    /// row seeding the fused kernel's accumulator, well within the 32 elements
-    /// for which arrays implement `Default`.
+    /// A block row, concretely `[T; D + 8]`. Its `Default` value is the zeroed
+    /// accumulator row of the fused kernel.
     type Row<T: Float + Default + Send + Sync>: AsRef<[T]> + AsMut<[T]> + Default + Send + Sync;
 
     /// Views a flat row-major block as typed rows.
@@ -114,11 +109,10 @@ const CHEBYSHEV_INITIAL_BOUND: f64 = 0.75;
 const REDUCTION_ROWS: usize = 4096;
 
 /// Tunable parameters of the spectral embedding initialization, accepted by
-/// [`tSNE::spectral_init_with`] and [`tSNE::spectral_embedding_with`]. Construct with
-/// [`SpectralParams::new`] (or [`Default::default`]) and adjust with the fluent
-/// setters. The defaults resolve the leading eigenvectors of a 70k point MNIST
-/// affinity graph to a fraction of a degree, so tuning is only warranted to trade
-/// accuracy for speed or to handle unusually structured graphs.
+/// [`tSNE::spectral_init_with`] and [`tSNE::spectral_embedding_with`]. The defaults
+/// resolve the leading eigenvectors of a 70k point MNIST affinity graph to a
+/// fraction of a degree, so tuning is only warranted to trade accuracy for speed or
+/// to handle unusually structured graphs.
 ///
 /// The solver's work is proportional to `rounds * degree` sparse matvecs over the
 /// affinity graph, each spanning the `D + 8` columns of the block.
@@ -209,14 +203,10 @@ impl SpectralParams {
 }
 
 /// Spectral embedding of the affinity graph in CSR form. Returns a flat row-major
-/// `n * d_out` matrix whose columns are the leading nontrivial eigenvectors of the
+/// `n * D` matrix whose columns are the leading nontrivial eigenvectors of the
 /// normalized graph Laplacian eigenmap, centered and scaled to std
-/// `params.seed_std`.
-///
-/// Like any fixed-width subspace method the solver resolves at most
-/// `D + SPECTRAL_OVERSAMPLE` directions, so on a graph with more connected
-/// components than that the component indicators outnumber the block and the result
-/// mixes them arbitrarily.
+/// `params.seed_std`. See [`SPECTRAL_OVERSAMPLE`] for the connected component
+/// limit inherent to the fixed block width.
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn spectral_embedding<T, const D: usize>(
     p_rows: &[usize],
@@ -350,25 +340,21 @@ where
     v
 }
 
-/// Estimates the leading `d_out` nontrivial eigenvectors of the similarity matrix
+/// Estimates the leading nontrivial eigenvectors of the similarity matrix
 /// `T = D^{-1/2} P D^{-1/2}` by Chebyshev-filtered subspace iteration on the shifted
-/// operator `M = (I + T) / 2` with Rayleigh-Ritz projections.
+/// operator `M = (I + T) / 2` with Rayleigh-Ritz projections, returning them as a
+/// flat row-major `n` by dimensionality matrix.
 ///
 /// The shift maps the spectrum of `T` from `[-1, 1]` to `[0, 1]` so the iteration
 /// cannot lock onto large negative eigenvalues arising from near-bipartite structure.
 /// The Perron vector `v0` (eigenvalue one) is projected out during the
-/// orthonormalization after every filter round.
-///
-/// On kNN affinity graphs the top eigenvalues are packed extremely close together, so
-/// plain power iteration needs thousands of matvecs to separate them. Each round here
-/// instead applies a degree `params.degree` Chebyshev polynomial that is bounded on
-/// the unwanted interval `[0, b]` and grows exponentially beyond it, which resolves
-/// the clustered leading eigenvalues in a small fixed matvec budget. The bound `b`
-/// starts crude and is refined from the Ritz values of the previous round. The
-/// recurrence is evaluated in its scaled form (each term divided by its value at the
-/// spectrum edge) so intermediates stay bounded in `f32`.
-///
-/// Returns a flat row-major `n * d_out` matrix.
+/// orthonormalization after every filter round. Each round applies a degree
+/// `params.degree` Chebyshev polynomial that is bounded on the unwanted interval
+/// `[0, b]` and grows exponentially beyond it, which resolves the tightly clustered
+/// leading eigenvalues in a small fixed matvec budget. The bound `b` starts crude and
+/// is refined from the Ritz values of the previous round. The recurrence is evaluated
+/// in its scaled form (each term divided by its value at the spectrum edge) so
+/// intermediates stay bounded in `f32`.
 #[allow(clippy::too_many_arguments)]
 fn chebyshev_rayleigh_ritz<T, S>(
     n: usize,
@@ -604,8 +590,7 @@ fn splitmix_unit<T: Float>(index: u64) -> T {
 /// combinations implement the scaled Chebyshev recurrence.
 ///
 /// Works over the associated row type of `S`, whose compile-time width lets the
-/// inner loops unroll and keeps the accumulator in registers, slightly more than
-/// twice the throughput of a dynamic-width version.
+/// inner loops unroll and keeps the accumulator in registers.
 #[allow(clippy::too_many_arguments)]
 fn matvec_combine<T, S>(
     v: &[T],
@@ -657,14 +642,13 @@ fn matvec_combine<T, S>(
 /// twice per column (CGS2), which restores orthogonality where a single classical
 /// Gram-Schmidt pass loses it to cancellation in `f32`.
 ///
-/// A column whose residual norm does not exceed `sqrt(eps)` of its starting norm
-/// carried no direction outside the span of the previous ones: its residual is rounding
-/// noise, and because that noise is correlated across columns, normalizing it
-/// produces near-duplicate columns and a rank-deficient basis whose Rayleigh-Ritz
-/// values are meaningless. An aggressive Chebyshev filter causes exactly this
-/// whenever the graph has fewer well separated leading eigenvectors than the block is
-/// wide. Such a column is therefore replaced by a fresh deterministic pseudo random
-/// direction and reorthogonalized, and zeroed if it collapses again.
+/// A column whose residual norm does not exceed `sqrt(eps)` of its starting norm is
+/// pure rounding noise, and normalizing that noise (correlated across columns) would
+/// hand Rayleigh-Ritz a rank-deficient basis with meaningless values, which an
+/// aggressive filter causes whenever the graph has fewer well separated leading
+/// eigenvectors than the block is wide. Such a column is replaced by a fresh
+/// deterministic pseudo random direction and reorthogonalized, and zeroed if it
+/// collapses again.
 fn orthonormalize_block<T>(v: &mut [T], n: usize, k: usize, v0: &[T], refresh_seed: u64)
 where
     T: Float + AddAssign + SubAssign + DivAssign + Send + Sync,
