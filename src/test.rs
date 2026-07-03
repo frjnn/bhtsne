@@ -2312,7 +2312,7 @@ fn spectral_init_with_custom_params_separates_blocks() {
     let mut tsne: tSNE<f32, &[f32], 1> = tSNE::new(&samples);
     tsne.with_affinities(affinities);
     // A cheaper budget than the defaults must still resolve this easy spectrum.
-    let params = SpectralParams::new().rounds(3).degree(10).oversample(4);
+    let params = SpectralParams::new().rounds(3).degree(10);
     let seed = tsne.spectral_embedding_with(params);
 
     let first_half_positive = seed[..HALF].iter().filter(|&&v| v > 0.0).count();
@@ -2402,6 +2402,24 @@ mod spectral_properties {
 
     use super::super::tsne::spectral::{SpectralParams, spectral_embedding};
 
+    /// Dispatches a runtime dimensionality from the proptest generator to the
+    /// const generic solver entry point.
+    fn run_embedding(
+        rows: &[usize],
+        columns: &[u32],
+        values: &[f32],
+        d_out: usize,
+        params: SpectralParams,
+    ) -> Vec<f32> {
+        match d_out {
+            1 => spectral_embedding::<f32, 1>(rows, columns, values, params),
+            2 => spectral_embedding::<f32, 2>(rows, columns, values, params),
+            3 => spectral_embedding::<f32, 3>(rows, columns, values, params),
+            4 => spectral_embedding::<f32, 4>(rows, columns, values, params),
+            _ => unreachable!("the generators only produce d_out 1 through 4"),
+        }
+    }
+
     /// Builds a symmetric CSR affinity graph from an arbitrary edge list,
     /// accumulating duplicate pairs and dropping self loops. Nodes untouched by any
     /// edge remain isolated, which is a legal (and interesting) input.
@@ -2469,7 +2487,7 @@ mod spectral_properties {
         ) {
             let (rows, columns, values) = symmetric_csr(n, &edges);
             let params = SpectralParams::default();
-            let embedding = spectral_embedding(&rows, &columns, &values, d_out, params);
+            let embedding = run_embedding(&rows, &columns, &values, d_out, params);
 
             prop_assert_eq!(embedding.len(), n * d_out);
             prop_assert!(embedding.iter().all(|v| v.is_finite()));
@@ -2492,7 +2510,7 @@ mod spectral_properties {
                 );
             }
 
-            let again = spectral_embedding(&rows, &columns, &values, d_out, params);
+            let again = run_embedding(&rows, &columns, &values, d_out, params);
             prop_assert_eq!(embedding, again);
         }
 
@@ -2508,7 +2526,7 @@ mod spectral_properties {
         ) {
             let (rows, columns, values) = two_clique_csr(size_a, size_b, w_a, w_b);
             let embedding =
-                spectral_embedding(&rows, &columns, &values, 1, SpectralParams::default());
+                run_embedding(&rows, &columns, &values, 1, SpectralParams::default());
 
             let sign_a = embedding[0] > 0.0;
             prop_assert!(
@@ -2527,7 +2545,6 @@ mod spectral_properties {
         fn embedding_contract_holds_for_any_params(
             rounds in 1usize..=6,
             degree in 1usize..=25,
-            oversample in 0usize..=12,
             seed_std in 1e-6f64..1e-2,
         ) {
             let (rows, columns, values) = two_clique_csr(12, 9, 1.0, 0.5);
@@ -2535,9 +2552,8 @@ mod spectral_properties {
             let params = SpectralParams::new()
                 .rounds(rounds)
                 .degree(degree)
-                .oversample(oversample)
                 .seed_std(seed_std);
-            let embedding = spectral_embedding(&rows, &columns, &values, 2, params);
+            let embedding = run_embedding(&rows, &columns, &values, 2, params);
 
             prop_assert_eq!(embedding.len(), n * 2);
             prop_assert!(embedding.iter().all(|v: &f32| v.is_finite()));
@@ -2554,7 +2570,7 @@ mod spectral_properties {
                 );
             }
 
-            let again = spectral_embedding(&rows, &columns, &values, 2, params);
+            let again = run_embedding(&rows, &columns, &values, 2, params);
             prop_assert_eq!(embedding, again);
         }
     }

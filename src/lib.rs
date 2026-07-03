@@ -72,8 +72,13 @@ pub use {
     rustfft::FftNum,
     tsne::interpolation::FftDim,
     tsne::morton::{Dim, Morton},
-    tsne::spectral::SpectralParams,
+    tsne::spectral::{SpectralBlock, SpectralParams},
 };
+
+/// Monomorphized spectral solver captured by [`tSNE::spectral_init_with`], where the
+/// [`SpectralBlock`] bound is available, and invoked by the seeding step of the fit,
+/// where it is not.
+type SpectralSeeder<T> = fn(&[usize], &[u32], &[T], SpectralParams) -> Vec<T>;
 
 use rayon::{
     iter::{
@@ -171,7 +176,7 @@ where
     gains: Vec<T>,
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
-    spectral_init: Option<SpectralParams>,
+    spectral_init: Option<(SpectralParams, SpectralSeeder<T>)>,
     stop_lying_fired: bool,
     cached_perplexity: Option<T>,
     fit: Option<Fit<T>>,
@@ -452,7 +457,10 @@ where
     ///
     /// [`initial_embedding`]: tSNE::initial_embedding
     /// [`spectral_init_with`]: tSNE::spectral_init_with
-    pub fn spectral_init(&mut self) -> &mut Self {
+    pub fn spectral_init(&mut self) -> &mut Self
+    where
+        Dim<D>: SpectralBlock,
+    {
         self.spectral_init_with(SpectralParams::default())
     }
 
@@ -471,9 +479,16 @@ where
     /// If an explicit [`initial_embedding`] is also set, it takes precedence and
     /// this setting is ignored.
     ///
+    /// The solver is monomorphized against the embedding dimensionality here, where
+    /// the [`SpectralBlock`] bound is available, and stored as a plain function
+    /// pointer so the seeding inside the fit needs no bound of its own.
+    ///
     /// [`initial_embedding`]: tSNE::initial_embedding
-    pub fn spectral_init_with(&mut self, params: SpectralParams) -> &mut Self {
-        self.spectral_init = Some(params);
+    pub fn spectral_init_with(&mut self, params: SpectralParams) -> &mut Self
+    where
+        Dim<D>: SpectralBlock,
+    {
+        self.spectral_init = Some((params, tsne::spectral::spectral_embedding::<T, D>));
 
         self
     }
@@ -725,8 +740,8 @@ where
                 self.y.iter_mut().zip(&init).for_each(|(y, &v)| *y = v);
             }
             None => match self.spectral_init {
-                Some(params) => {
-                    let seed = self.spectral_embedding_with(params);
+                Some((params, seeder)) => {
+                    let seed = seeder(&self.p_rows, &self.p_columns, &self.p_values, params);
                     self.y.iter_mut().zip(&seed).for_each(|(y, &v)| *y = v);
                 }
                 None => tsne::random_init(&mut self.y),
@@ -1098,26 +1113,33 @@ where
     /// and is suitable as a t-SNE seed.
     ///
     /// Uses the affinity graph already built by [`barnes_hut`] or provided via
-    /// [`with_affinities`].
+    /// [`with_affinities`]. Available for the dimensionalities carrying a
+    /// [`SpectralBlock`] impl.
     ///
     /// [`spectral_init`]: tSNE::spectral_init
     /// [`initial_embedding`]: tSNE::initial_embedding
     /// [`barnes_hut`]: tSNE::barnes_hut
     /// [`with_affinities`]: tSNE::with_affinities
-    pub fn spectral_embedding(&self) -> Vec<T> {
+    pub fn spectral_embedding(&self) -> Vec<T>
+    where
+        Dim<D>: SpectralBlock,
+    {
         self.spectral_embedding_with(SpectralParams::default())
     }
 
     /// Same as [`spectral_embedding`], with custom [`SpectralParams`].
     ///
     /// [`spectral_embedding`]: tSNE::spectral_embedding
-    pub fn spectral_embedding_with(&self, params: SpectralParams) -> Vec<T> {
-        assert!(
-            self.p_rows.len() > 1,
-            "spectral_embedding requires affinities to be built"
-        );
-
-        tsne::spectral::spectral_embedding(&self.p_rows, &self.p_columns, &self.p_values, D, params)
+    pub fn spectral_embedding_with(&self, params: SpectralParams) -> Vec<T>
+    where
+        Dim<D>: SpectralBlock,
+    {
+        tsne::spectral::spectral_embedding::<T, D>(
+            &self.p_rows,
+            &self.p_columns,
+            &self.p_values,
+            params,
+        )
     }
 
     /// Injects a previously extracted affinity graph. The next `barnes_hut`
