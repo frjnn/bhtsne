@@ -258,11 +258,11 @@ where
             pairs
         })
         .collect();
-    let mut edge_cols: Vec<usize> = Vec::with_capacity(p_columns.len());
+    let mut edge_cols: Vec<u32> = Vec::with_capacity(p_columns.len());
     let mut edge_weights: Vec<T> = Vec::with_capacity(p_columns.len());
     for row in &sorted_rows {
         for &(col, weight) in row {
-            edge_cols.push(col as usize);
+            edge_cols.push(col);
             edge_weights.push(weight);
         }
     }
@@ -361,7 +361,7 @@ fn chebyshev_rayleigh_ritz<T, S>(
     v0: &[T],
     inv_sqrt_d: &[T],
     p_rows: &[usize],
-    edge_cols: &[usize],
+    edge_cols: &[u32],
     edge_weights: &[T],
     params: SpectralParams,
 ) -> Vec<T>
@@ -598,7 +598,7 @@ fn matvec_combine<T, S>(
     out: &mut [T],
     inv_sqrt_d: &[T],
     p_rows: &[usize],
-    edge_cols: &[usize],
+    edge_cols: &[u32],
     edge_weights: &[T],
     mul_mv: T,
     mul_v: T,
@@ -618,7 +618,7 @@ fn matvec_combine<T, S>(
             let mut acc = <S::Row<T>>::default();
             let acc = acc.as_mut();
             for e in p_rows[i]..p_rows[i + 1] {
-                let j = edge_cols[e];
+                let j = edge_cols[e] as usize;
                 let w = edge_weights[e];
                 let v_row = v_rows[j].as_ref();
                 for d in 0..S::WIDTH {
