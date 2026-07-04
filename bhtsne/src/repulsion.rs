@@ -58,10 +58,10 @@ pub(crate) trait Repulsion<T, const D: usize> {
 /// contributions, the latter reduced into `Z` afterwards.
 pub(crate) struct BarnesHutRepulsion<T, W, const D: usize>
 where
-    W: tsne::morton::MortonWord,
+    W: barnes_hut_tree::MortonWord,
 {
     /// Morton arena, rebuilt over the embedding each epoch so its buffers persist.
-    arena: tsne::arena::Arena<T, W, D>,
+    arena: barnes_hut_tree::Arena<T, W, D>,
     /// Per-sample contribution to the `Q` normalizer, reduced after the force pass.
     /// Sized to the sample count on the first epoch and reused thereafter.
     q_sums: Vec<T>,
@@ -74,11 +74,11 @@ where
 impl<T, W, const D: usize> BarnesHutRepulsion<T, W, D>
 where
     T: Float + Send + Sync + AddAssign,
-    W: tsne::morton::MortonWord,
+    W: barnes_hut_tree::MortonWord,
 {
     pub(crate) fn new(theta: T) -> Self {
         Self {
-            arena: tsne::arena::Arena::empty(),
+            arena: barnes_hut_tree::Arena::empty(),
             q_sums: Vec::new(),
             theta,
             theta_sq: theta * theta,
@@ -89,8 +89,8 @@ where
 impl<T, W, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, W, D>
 where
     T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
-    W: tsne::morton::MortonWord,
-    tsne::morton::Dim<D>: tsne::morton::Morton<D, Word = W>,
+    W: barnes_hut_tree::MortonWord,
+    barnes_hut_tree::Dim<D>: barnes_hut_tree::Morton<D, Word = W>,
 {
     fn step(
         &mut self,
@@ -124,7 +124,7 @@ where
                     (
                         [T::zero(); D],
                         [T::zero(); D],
-                        <tsne::morton::Dim<D> as tsne::morton::Morton<D>>::empty_stack(),
+                        <barnes_hut_tree::Dim<D> as barnes_hut_tree::Morton<D>>::empty_stack(),
                     )
                 },
                 |(edge_row, nonedge_row, stack),
@@ -133,7 +133,7 @@ where
                     *edge_row = [T::zero(); D];
                     *nonedge_row = [T::zero(); D];
                     let mut q_sum = T::zero();
-                    tsne::arena::compute_edge_forces::<T, D>(
+                    tsne::compute_edge_forces::<T, D>(
                         index, y, p_rows, p_columns, p_values, edge_row,
                     );
                     arena.compute_non_edge_forces(
@@ -220,9 +220,7 @@ where
             .enumerate()
             .for_each(|(index, row)| {
                 row.fill(T::zero());
-                tsne::arena::compute_edge_forces::<T, D>(
-                    index, y, p_rows, p_columns, p_values, row,
-                );
+                tsne::compute_edge_forces::<T, D>(index, y, p_rows, p_columns, p_values, row);
             });
 
         // Repulsive (negative) forces and the Q normalizer Z via FFT interpolation.

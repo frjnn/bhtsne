@@ -204,6 +204,7 @@ fn kl_divergence_after_exact_is_finite_and_nonnegative() {
     assert!(kl.is_finite() && kl >= 0.0, "{kl}");
 }
 
+#[cfg(feature = "csv")]
 #[test]
 #[ignore = "requires iris dataset"]
 fn exact_tsne() {
@@ -231,6 +232,7 @@ fn exact_tsne() {
     assert!(tsne.kl_divergence().unwrap() < 0.5);
 }
 
+#[cfg(feature = "csv")]
 #[test]
 #[ignore = "requires iris dataset"]
 fn barnes_hut_tsne() {
@@ -1169,18 +1171,9 @@ fn arena_build_maintains_invariants() {
         *value += 100.0;
     }
 
-    let arena = tsne::arena::Arena::<f32, u64, 2>::new(&data, N);
+    let arena = barnes_hut_tree::Arena::<f32, u64, 2>::new(&data, N);
 
     assert_eq!(arena.root_count(), N, "arena lost or invented points");
-}
-
-/// Verify the 5D Morton codec and arena path compile and function correctly.
-#[test]
-fn arena_builds_5d() {
-    const N: usize = 500;
-    let data = lcg_samples(N, 5, 42);
-    let arena = tsne::arena::Arena::<f32, u128, 5>::new(&data, N);
-    assert_eq!(arena.root_count(), N);
 }
 
 /// End-to-end regression test for the same bug, reproducing the symptom directly: corrupted
@@ -1978,16 +1971,8 @@ fn barnes_hut_runs_in_six_dimensions() {
     assert!(embedding.iter().all(|v| v.is_finite()));
 }
 
-/// Verify the 6D Morton codec and arena path compile and function correctly.
-#[test]
-fn arena_builds_6d() {
-    const N: usize = 500;
-    let data = lcg_samples(N, 6, 46);
-    let arena = tsne::arena::Arena::<f32, u128, 6>::new(&data, N);
-    assert_eq!(arena.root_count(), N);
-}
-
-/// Verify the 7D Morton codec and arena path compile and function correctly.
+/// Smoke test for the 7D Barnes-Hut path: the embedding stays finite and correctly sized
+/// after a short fit.
 #[test]
 fn barnes_hut_runs_in_seven_dimensions() {
     const N: usize = 200;
@@ -2002,15 +1987,6 @@ fn barnes_hut_runs_in_seven_dimensions() {
     let embedding = tsne.embedding();
     assert_eq!(embedding.len(), N * 7);
     assert!(embedding.iter().all(|v| v.is_finite()));
-}
-
-/// Verify the 7D Morton codec and arena path compile and function correctly.
-#[test]
-fn arena_builds_7d() {
-    const N: usize = 500;
-    let data = lcg_samples(N, 7, 47);
-    let arena = tsne::arena::Arena::<f32, u128, 7>::new(&data, N);
-    assert_eq!(arena.root_count(), N);
 }
 
 /// Build a two-block CSR affinity graph: two cliques of `half` nodes joined by a

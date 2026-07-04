@@ -72,7 +72,8 @@ impl<T: Float> PartialOrd for HeapItem<T> {
 
 impl<T: Float> PartialEq for HeapItem<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+        // NaN == NaN for heap consistency; partial_cmp would say they differ.
+        self.distance.is_nan() && other.distance.is_nan() || self.distance == other.distance
     }
 }
 
@@ -80,7 +81,16 @@ impl<T: Float> Eq for HeapItem<T> {}
 
 impl<T: Float> Ord for HeapItem<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.distance.partial_cmp(&other.distance).unwrap()
+        // Total order: NaN sorts after all finite values.
+        match (self.distance.is_nan(), other.distance.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => self
+                .distance
+                .partial_cmp(&other.distance)
+                .unwrap_or(Ordering::Equal),
+        }
     }
 }
 
@@ -289,7 +299,7 @@ impl<'a, T: Float + Send + Sync, U> VPTree<'a, T, U> {
         scratch.heap.clear();
         // Perform the search.
         self.look_up(
-            &mut T::max_value(),
+            &mut T::infinity(),
             target,
             k,
             &mut scratch.heap,

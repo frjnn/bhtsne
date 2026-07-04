@@ -25,7 +25,7 @@ use rayon::{
     slice::ParallelSliceMut,
 };
 
-use super::morton::Dim;
+use barnes_hut_tree::Dim;
 
 /// Seals [`SpectralBlock`], keeping the trait free to evolve.
 mod sealed {

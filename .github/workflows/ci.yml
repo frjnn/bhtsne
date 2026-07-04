@@ -33,7 +33,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Download iris dataset
-        run: curl -sSfO "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv"
+        run: curl -sSf -o bhtsne/iris.csv "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv"
       - name: Run tests
         run: cargo test --all-features -- --include-ignored
       - name: Smoke-test benchmarks
@@ -90,7 +90,7 @@ jobs:
       - name: Install fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: Download iris dataset
-        run: curl -sSfO "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv"
+        run: curl -sSf -o bhtsne/iris.csv "https://gist.githubusercontent.com/curran/a08a1080b88344b0c8a7/raw/0e7a9b0a5d22642a06d3d5b9bcbad9890c8ee534/iris.csv"
       - name: Generate coverage report
         run: cargo tarpaulin --out xml --all-features --ignored --timeout 600
       - name: Upload to codecov

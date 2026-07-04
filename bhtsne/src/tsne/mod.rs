@@ -1,7 +1,5 @@
-pub(super) mod arena;
 pub(super) mod fft;
 pub(super) mod interpolation;
-pub(super) mod morton;
 pub(super) mod spectral;
 pub(super) mod vptree;
 
@@ -26,10 +24,11 @@ use rustfft::FftNum;
 
 /// Adaptive-gain constants shared by the exact and approximate updates: the gain is
 /// bumped by `GAIN_INCREMENT` when the gradient and velocity disagree in sign,
-/// decayed by `GAIN_DECAY` when they agree, and floored at `MIN_GAIN`.
+/// decayed by `GAIN_DECAY` when they agree, floored at `MIN_GAIN`, and capped at `MAX_GAIN`.
 const GAIN_INCREMENT: f64 = 0.2;
 const GAIN_DECAY: f64 = 0.8;
 const MIN_GAIN: f64 = 0.01;
+const MAX_GAIN: f64 = 2.0;
 
 /// Per-epoch scalars for the fused [`gradient_descent_step`].
 pub(super) struct GradientStep<T> {
@@ -431,7 +430,7 @@ pub(super) fn update_solution<T>(
 ) where
     T: Float + Send + Sync + AddAssign,
 {
-    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
+    let (gain_increment, gain_decay, min_gain, max_gain) = gain_constants::<T>();
 
     y.par_iter_mut()
         .zip(dy.par_iter())
@@ -445,6 +444,9 @@ pub(super) fn update_solution<T>(
             };
             if *gains_el < min_gain {
                 *gains_el = min_gain;
+            }
+            if *gains_el > max_gain {
+                *gains_el = max_gain;
             }
             *uy_el = *momentum * *uy_el - *learning_rate * *gains_el * *dy_el;
             *y_el += *uy_el
@@ -483,7 +485,7 @@ pub(super) fn gradient_descent_step<T, const D: usize>(
         momentum,
         inverse_norm,
     } = step;
-    let (gain_increment, gain_decay, min_gain) = gain_constants::<T>();
+    let (gain_increment, gain_decay, min_gain, max_gain) = gain_constants::<T>();
 
     y.par_chunks_mut(D)
         .with_min_len(crate::PARALLEL_CODE_THRESHOLD)
@@ -508,6 +510,9 @@ pub(super) fn gradient_descent_step<T, const D: usize>(
                         };
                         if *gain < min_gain {
                             *gain = min_gain;
+                        }
+                        if *gain > max_gain {
+                            *gain = max_gain;
                         }
                         *uy_el = momentum * *uy_el - learning_rate * *gain * gradient;
                         *y_el += *uy_el;
@@ -643,19 +648,22 @@ pub(crate) fn evaluate_error_approximately<T, const D: usize>(
 ) -> T
 where
     T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
-    morton::Dim<D>: morton::Morton<D>,
+    barnes_hut_tree::Dim<D>: barnes_hut_tree::Morton<D>,
 {
     // Get estimate of normalization term.
     let q_sum = {
-        let arena =
-            arena::Arena::<T, <morton::Dim<D> as morton::Morton<D>>::Word, D>::new(y, n_samples);
+        let arena = barnes_hut_tree::Arena::<
+            T,
+            <barnes_hut_tree::Dim<D> as barnes_hut_tree::Morton<D>>::Word,
+            D,
+        >::new(y, n_samples);
         let theta_sq = theta * theta;
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 
         q_sums.par_iter_mut().enumerate().for_each(|(index, sum)| {
             // Local scratch: the repulsive forces are not needed here, only their q_sum.
             let mut negative_forces = [T::zero(); D];
-            let mut stack = <morton::Dim<D> as morton::Morton<D>>::empty_stack();
+            let mut stack = <barnes_hut_tree::Dim<D> as barnes_hut_tree::Morton<D>>::empty_stack();
             arena.compute_non_edge_forces(
                 index,
                 theta_sq,
@@ -775,12 +783,47 @@ where
     partials.par_iter().map(|partial| *partial).sum::<T>()
 }
 
-/// The three adaptive-gain constants converted to `T`, computed once per update pass.
+/// The four adaptive-gain constants converted to `T`, computed once per update pass.
 #[inline]
-fn gain_constants<T: Float>() -> (T, T, T) {
+fn gain_constants<T: Float>() -> (T, T, T, T) {
     (
         T::from(GAIN_INCREMENT).unwrap(),
         T::from(GAIN_DECAY).unwrap(),
         T::from(MIN_GAIN).unwrap(),
+        T::from(MAX_GAIN).unwrap(),
     )
+}
+
+/// Accumulates the edge (attractive) forces on point `index` from its sparse P matrix neighbors
+/// into `positive_forces_row`. A free function over the embedding and the P arrays: the attractive
+/// pass reads point coordinates directly and never touches the tree.
+pub(crate) fn compute_edge_forces<T, const D: usize>(
+    index: usize,
+    y: &[T],
+    p_rows: &[usize],
+    p_columns: &[u32],
+    p_values: &[T],
+    positive_forces_row: &mut [T],
+) where
+    T: Float + AddAssign,
+{
+    let (y_chunks, _) = y.as_chunks::<D>();
+
+    let sample = &y_chunks[index];
+    for entry in p_rows[index]..p_rows[index + 1] {
+        let other = p_columns[entry] as usize;
+        let other_sample = &y_chunks[other];
+
+        let mut displacement = [T::zero(); D];
+        let mut distance = T::zero();
+        for axis in 0..D {
+            let delta = sample[axis] - other_sample[axis];
+            displacement[axis] = delta;
+            distance += delta * delta;
+        }
+        let factor = p_values[entry] / (distance + T::one());
+        for axis in 0..D {
+            positive_forces_row[axis] += factor * displacement[axis];
+        }
+    }
 }
