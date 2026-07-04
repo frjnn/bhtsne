@@ -9,15 +9,15 @@ use rayon::prelude::*;
 
 use rustfft::{FftNum, num_complex::Complex};
 
-use super::{fft::FftGrid, morton::Dim};
+use super::fft::FftGrid;
 
 /// Sealed marker restricting the FFT interpolation path to the embedding
 /// dimensionalities whose grid stays tractable, `D in {1, 2}`.
 #[doc(hidden)]
 pub trait FftDim {}
 
-impl FftDim for Dim<1> {}
-impl FftDim for Dim<2> {}
+impl FftDim for barnes_hut_tree::Dim<1> {}
+impl FftDim for barnes_hut_tree::Dim<2> {}
 
 /// Interpolation nodes per box along each axis (`p` in the paper). Three nodes give
 /// the quadratic interpolation FIt-SNE and openTSNE use by default.
@@ -180,7 +180,9 @@ where
                         0
                     };
                     box_row[axis] = box_id;
-                    let local = offset - T::from(box_id).unwrap();
+                    let local = (offset - T::from(box_id).unwrap())
+                        .max(T::zero())
+                        .min(T::one());
                     basis.weights(local, &mut weight_row[axis * INTERPOLATION_POINTS..]);
                 }
             });
@@ -390,7 +392,7 @@ const fn signed_lag(coord: usize, fft_len: usize) -> isize {
 
 /// Node positions and reciprocal denominator products for the `I`
 /// Lagrange basis. Both depend only on the equispaced nodes at `(k + 0.5) / p`, not on
-/// the sample, so they are built once per [`InterpolationGrid::repulsive_forces`] and
+/// the sample, so they are built once per [`Interpolant::repulsive_forces`] and
 /// reused across every per-point, per-axis weight evaluation.
 struct LagrangeBasis<const I: usize, T> {
     nodes: [T; I],

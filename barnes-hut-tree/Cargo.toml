@@ -1,0 +1,20 @@
+[package]
+name = "barnes-hut-tree"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Morton-code Barnes-Hut tree for spatial force approximation."
+categories = ["algorithms", "science"]
+keywords = ["Barnes-Hut", "morton", "spatial", "quadtree", "force-approximation"]
+repository = "https://github.com/frjnn/bhtsne"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+num-traits = "0.2"
+rayon = "1"
+
+[dev-dependencies]
+proptest = "1"
+rand = "0.9"

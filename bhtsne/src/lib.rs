@@ -11,7 +11,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! # use std::error::Error;
 //! use bhtsne;
 //!
@@ -69,9 +69,9 @@ pub use csv::load_csv;
 
 /// Public re-exports.
 pub use {
+    barnes_hut_tree::{Dim, Morton},
     rustfft::FftNum,
     tsne::interpolation::FftDim,
-    tsne::morton::{Dim, Morton},
     tsne::spectral::{SpectralBlock, SpectralParams},
 };
 

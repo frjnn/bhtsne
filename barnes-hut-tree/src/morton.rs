@@ -38,6 +38,9 @@ pub trait MortonWord:
     fn msb_position(self) -> u32;
 
     /// Returns a value with the low `d` bits set (a D-bit group mask).
+    ///
+    /// Undefined when `d >= Self::BITS` (shift amounts are masked to `BITS - 1`).
+    /// Callers should keep `d < Self::BITS`; the arena only uses `d <= 7`.
     fn d_bit_mask(d: u32) -> Self;
 }
 
@@ -49,6 +52,10 @@ impl MortonWord for u64 {
     }
     #[inline]
     fn msb_position(self) -> u32 {
+        if self == 0 {
+            return Self::BITS - 1;
+        }
+
         Self::BITS - 1 - self.leading_zeros()
     }
 }
@@ -61,6 +68,10 @@ impl MortonWord for u128 {
         (1u128 << d) - 1
     }
     fn msb_position(self) -> u32 {
+        if self == 0 {
+            return Self::BITS - 1;
+        }
+
         Self::BITS - 1 - self.leading_zeros()
     }
 }
@@ -117,4 +128,43 @@ pub(crate) fn quantize<T: Float, const D: usize>(
             0
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u64_msb_position() {
+        assert_eq!(0u64.msb_position(), 63);
+        assert_eq!(1u64.msb_position(), 0);
+        assert_eq!(2u64.msb_position(), 1);
+        assert_eq!(u64::MAX.msb_position(), 63);
+        assert_eq!((1u64 << 40).msb_position(), 40);
+    }
+
+    #[test]
+    fn u128_msb_position() {
+        assert_eq!(0u128.msb_position(), 127);
+        assert_eq!(1u128.msb_position(), 0);
+        assert_eq!(2u128.msb_position(), 1);
+        assert_eq!(u128::MAX.msb_position(), 127);
+        assert_eq!((1u128 << 80).msb_position(), 80);
+    }
+
+    #[test]
+    fn u64_d_bit_mask() {
+        assert_eq!(u64::d_bit_mask(0), 0);
+        assert_eq!(u64::d_bit_mask(1), 1);
+        assert_eq!(u64::d_bit_mask(2), 3);
+        assert_eq!(u64::d_bit_mask(4), 15);
+        assert_eq!(u64::d_bit_mask(32), (1u64 << 32) - 1);
+    }
+
+    #[test]
+    fn u128_d_bit_mask() {
+        assert_eq!(u128::d_bit_mask(0), 0);
+        assert_eq!(u128::d_bit_mask(1), 1);
+        assert_eq!(u128::d_bit_mask(64), (1u128 << 64) - 1);
+    }
 }

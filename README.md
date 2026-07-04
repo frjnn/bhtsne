@@ -2,6 +2,9 @@
 
 <div align="center">
 
+[![CI](https://github.com/frjnn/bhtsne/actions/workflows/ci.yml/badge.svg)](https://github.com/frjnn/bhtsne/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/bhtsne.svg)](https://crates.io/crates/bhtsne)
+[![docs.rs](https://docs.rs/bhtsne/badge.svg)](https://docs.rs/bhtsne)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![codecov](https://codecov.io/gh/frjnn/bhtsne/branch/master/graph/badge.svg)](https://codecov.io/gh/frjnn/bhtsne)
 
@@ -66,6 +69,8 @@ bhtsne::tSNE::<f32, &[f32], 2>::new(&samples)
 In the example euclidean distance is used, but any other distance metric on data types of choice, such as strings, can be defined and plugged in.
 
 The tree-accelerated `barnes_hut` and `barnes_hut_with_neighbors` support an embedding dimensionality `D` of 2, 3, 4, 5, 6, or 7, the dimensionalities a Z-order code covers with ample precision (32, 21, 16, 25, 21, and 18 bits per axis, respectively). The exact `exact` path stays general for any `D`.
+
+The Morton (Z-order) linear tree the Barnes-Hut path walks lives in the sibling [`barnes-hut-tree`](barnes-hut-tree/README.md) crate, which the workspace also publishes standalone. Any other force-approximation problem that needs a Z-order linear tree in a contiguous arena can pull it in directly through its `Arena`, `Morton`, and `Dim` API, without depending on `bhtsne`.
 
 ## FIt-SNE
 

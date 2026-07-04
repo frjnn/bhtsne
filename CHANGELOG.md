@@ -2,7 +2,15 @@
 
 ## 0.7.11
 
-Add 5D, 6D, and 7D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 5, 6, or 7 (in addition to 2, 3, and 4). The Morton codec uses 25 bits per axis at `D = 5` (125 bits, `u128` code), 21 bits per axis at `D = 6` (126 bits, `u128` code), and 18 bits per axis at `D = 7` (126 bits, `u128` code).
+Split the crate into a Cargo workspace with the Morton (Z-order) linear tree extracted into a new `barnes-hut-tree` companion crate that `bhtsne` now depends on. The extracted crate exposes `Arena`, `Morton`, `MortonWord`, and `Dim`, so any other force-approximation problem can reuse the tree directly without pulling in the tSNE optimizer. The `bhtsne` public API is unchanged.
+
+Extend the Barnes-Hut path to 5D, 6D, and 7D embeddings: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 5, 6, or 7 in addition to 2, 3, and 4. The Morton codec uses 25 bits per axis at `D = 5` (125 bits, `u128` code), 21 bits per axis at `D = 6` (126 bits, `u128` code), and 18 bits per axis at `D = 7` (126 bits, `u128` code).
+
+Cap the adaptive gains at `MAX_GAIN = 2.0` in both the exact and approximate gradient-descent updates, matching the openTSNE and scikit-learn recipe. Runs of gradient and velocity disagreement no longer let the per-coordinate gain grow without bound during volatile phases, which stabilizes long fits.
+
+Clamp the per-axis Lagrange coordinate to `[0, 1]` in the FIt-SNE grid gather, so a point at the exact upper edge of the bounding box (or one nudged past by float drift after the `box_id` cap) evaluates the basis inside its interpolation domain rather than extrapolating.
+
+Harden the vantage-point tree search against `NaN` distances. `HeapItem` now imposes a total order that sorts `NaN` after every finite value and treats `NaN` as equal to `NaN` under `PartialEq`, so the bounded max-heap stays consistent when the caller's metric returns `NaN`.
 
 ## 0.7.10
 Add 4D support for the Barnes-Hut path: `barnes_hut` and `barnes_hut_with_neighbors` now accept an embedding dimensionality `D` of 4 (in addition to 2 and 3). The Morton codec uses 16 bits per axis at `D = 4`, so points closer than `1 / 65536` of the bounding-box width on any axis collapse into the same leaf cell.

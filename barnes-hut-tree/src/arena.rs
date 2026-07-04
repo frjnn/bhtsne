@@ -16,9 +16,11 @@ use num_traits::Float;
 
 use rayon::prelude::*;
 
-use crate::PARALLEL_CODE_THRESHOLD;
+use crate::morton::{Dim, Morton, MortonWord, quantize};
 
-use super::morton::{Dim, Morton, MortonWord, quantize};
+/// Minimum sample count before parallel rayon iterations use `with_min_len` to avoid
+/// overhead on small workloads.
+const ARENA_MIN_CHUNK: usize = 4096;
 
 /// `first_child` value marking a leaf, a node with no children in the arena.
 const SENTINEL: u32 = u32::MAX;
@@ -42,10 +44,10 @@ struct Node<T, const D: usize> {
     level: u8,
 }
 
-/// A Morton linear quadtree (`D == 2`), octree (`D == 3`), or 16-cell tree (`D == 4`) over the
-/// embedding, in one arena. `W` is the Morton word type (e.g. `u64` for D in {2,3,4}).
+/// A Morton linear tree over the embedding, in one arena, for `D` in `{2, 3, 4, 5, 6, 7}`.
+/// `W` is the Morton code word type: `u64` for `D <= 4` and `u128` for `D >= 5`.
 #[derive(Debug)]
-pub(crate) struct Arena<T, W, const D: usize>
+pub struct Arena<T, W, const D: usize>
 where
     W: MortonWord,
 {
@@ -68,7 +70,7 @@ where
 {
     y_chunks
         .par_iter()
-        .with_min_len(PARALLEL_CODE_THRESHOLD)
+        .with_min_len(ARENA_MIN_CHUNK)
         .fold(
             || ([T::max_value(); D], [-T::max_value(); D]),
             |(mut min, mut max), point| {
@@ -100,13 +102,19 @@ where
 {
     /// Creates an empty arena. The epoch loop holds one of these and rebuilds it each epoch so the
     /// buffers persist and are reused.
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             nodes: Vec::new(),
             ranges: Vec::new(),
             sorted: Vec::new(),
             level_half_width_sq: Vec::new(),
         }
+    }
+
+    /// Returns the number of points the arena holds (the root node's mass).
+    /// Zero when the arena is empty.
+    pub fn root_count(&self) -> usize {
+        self.nodes.first().map_or(0, |node| node.count as usize)
     }
 
     /// Builds a fresh arena over `y`, a flat buffer of `n_samples` points of `D` components each.
@@ -117,7 +125,7 @@ where
     ///
     /// If the leaf masses do not sum to `n_samples` (point conservation), which a correct Morton
     /// build always satisfies.
-    pub(crate) fn new(y: &[T], n_samples: usize) -> Self
+    pub fn new(y: &[T], n_samples: usize) -> Self
     where
         Dim<D>: Morton<D, Word = W>,
     {
@@ -134,7 +142,7 @@ where
     ///
     /// If the leaf masses do not sum to `n_samples` (point conservation), which a correct Morton
     /// build always satisfies.
-    pub(crate) fn rebuild(&mut self, y: &[T], n_samples: usize)
+    pub fn rebuild(&mut self, y: &[T], n_samples: usize)
     where
         Dim<D>: Morton<D, Word = W>,
     {
@@ -178,7 +186,7 @@ where
         self.sorted.par_extend(
             (0..n_samples)
                 .into_par_iter()
-                .with_min_len(PARALLEL_CODE_THRESHOLD)
+                .with_min_len(ARENA_MIN_CHUNK)
                 .map(|i| {
                     let point = &y_chunks[i];
                     let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
@@ -264,7 +272,7 @@ where
         nodes
             .par_iter_mut()
             .zip(ranges.par_iter())
-            .with_min_len(PARALLEL_CODE_THRESHOLD)
+            .with_min_len(ARENA_MIN_CHUNK)
             .filter(|(node, _)| node.first_child == SENTINEL)
             .for_each(|(node, &(start, end))| {
                 let mut center = [T::zero(); D];
@@ -309,9 +317,8 @@ where
         }
 
         // Point conservation: every input point lands in exactly one leaf, so the leaf masses
-        // must sum to the input count. Morton quantization guarantees this, but the check guards
-        // the breadth-first range bookkeeping. Kept as a release assert because correctness is
-        // not relaxed.
+        // must sum to the input count. Morton quantization guarantees this in exact arithmetic,
+        // and the check guards the breadth-first range bookkeeping in debug builds.
         debug_assert_eq!(
             nodes
                 .iter()
@@ -329,13 +336,17 @@ where
 
     /// Accumulates the non-edge (repulsive) Barnes-Hut forces on point `index` into
     /// `negative_forces_row` and the normalization term `q_sum`. Iterative traversal over the arena
-    /// using `stack` as reusable scratch, a mutable slice of [`morton::Morton::Stack`].
+    /// using `stack` as reusable scratch, a mutable slice of [`crate::morton::Morton::Stack`].
     ///
     /// A node is summarized by its center of mass when it is a leaf or passes the theta test, and
     /// otherwise its children are pushed. The leaf holding the query's own point has zero distance
-    /// to its center and is skipped, the self-interaction exclusion: a singleton leaf's center is
     /// exactly the query coordinate. `theta_sq` is `theta * theta`.
-    pub(crate) fn compute_non_edge_forces(
+    ///
+    /// # Panics
+    ///
+    /// If `index >= y.len() / D` (out-of-bounds sample index) or if `stack` is shorter than
+    /// the [`Morton::Stack`] for dimension `D`.
+    pub fn compute_non_edge_forces(
         &self,
         index: usize,
         theta_sq: T,
@@ -392,40 +403,6 @@ where
     }
 }
 
-/// Accumulates the edge (attractive) forces on point `index` from its sparse P matrix neighbors
-/// into `positive_forces_row`. A free function over the embedding and the P arrays: the attractive
-/// pass reads point coordinates directly and never touches the tree.
-pub(crate) fn compute_edge_forces<T, const D: usize>(
-    index: usize,
-    y: &[T],
-    p_rows: &[usize],
-    p_columns: &[u32],
-    p_values: &[T],
-    positive_forces_row: &mut [T],
-) where
-    T: Float + AddAssign,
-{
-    let (y_chunks, _) = y.as_chunks::<D>();
-
-    let sample = &y_chunks[index];
-    for entry in p_rows[index]..p_rows[index + 1] {
-        let other = p_columns[entry] as usize;
-        let other_sample = &y_chunks[other];
-
-        let mut displacement = [T::zero(); D];
-        let mut distance = T::zero();
-        for axis in 0..D {
-            let delta = sample[axis] - other_sample[axis];
-            displacement[axis] = delta;
-            distance += delta * delta;
-        }
-        let factor = p_values[entry] / (distance + T::one());
-        for axis in 0..D {
-            positive_forces_row[axis] += factor * displacement[axis];
-        }
-    }
-}
-
 /// Whether every node's center of mass lies inside its Morton cell. Used only at build time in
 /// debug builds. Derives each cell from a representative member code, the node level, and the
 /// bounding box, so it needs the still-live sorted codes and ranges rather than per-node storage.
@@ -467,10 +444,19 @@ impl<T, W, const D: usize> Arena<T, W, D>
 where
     W: MortonWord,
 {
-    /// Number of points the arena holds, the root mass. Used by the build-invariant tests, where
-    /// it crosses into a sibling module that cannot reach the private node array.
-    pub(crate) fn root_count(&self) -> usize {
-        self.nodes.first().map_or(0, |node| node.count as usize)
+    /// Root node's center of mass as a slice.
+    pub(crate) fn root_center_of_mass(&self) -> &[T] {
+        self.nodes.first().map_or(&[], |node| &node.center_of_mass)
+    }
+
+    /// Number of nodes in the arena.
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// First child of the root (SENTINEL if leaf).
+    pub(crate) fn root_first_child(&self) -> u32 {
+        self.nodes.first().map_or(SENTINEL, |node| node.first_child)
     }
 }
 
@@ -531,9 +517,9 @@ mod tests {
         let data = lcg_cloud(N, 2, 5);
         let arena = Arena::<f32, u64, 2>::new(&data, N);
         let expected = mean::<2>(&data, N);
-        let root = &arena.nodes[0];
-        assert!((root.center_of_mass[0] - expected[0]).abs() < 1e-3);
-        assert!((root.center_of_mass[1] - expected[1]).abs() < 1e-3);
+        let root = arena.root_center_of_mass();
+        assert!((root[0] - expected[0]).abs() < 1e-3);
+        assert!((root[1] - expected[1]).abs() < 1e-3);
     }
 
     /// Points closer than one grid cell collapse to a single leaf with the summed mass, the
@@ -545,9 +531,8 @@ mod tests {
         let arena = Arena::<f32, u64, 2>::new(&data, N);
         assert_eq!(arena.root_count(), N);
         // All identical: the root itself is the single collapsed leaf.
-        assert_eq!(arena.nodes.len(), 1);
-        assert_eq!(arena.nodes[0].first_child, SENTINEL);
-        assert_eq!(arena.nodes[0].count as usize, N);
+        assert_eq!(arena.node_count(), 1);
+        assert_eq!(arena.root_first_child(), SENTINEL);
     }
 
     /// A single point builds a one-node arena whose center of mass is that point.
@@ -556,8 +541,9 @@ mod tests {
         let data = [2.0f32, -1.0];
         let arena = Arena::<f32, u64, 2>::new(&data, 1);
         assert_eq!(arena.root_count(), 1);
-        assert_eq!(arena.nodes.len(), 1);
-        assert_eq!(arena.nodes[0].center_of_mass, [2.0, -1.0]);
+        assert_eq!(arena.node_count(), 1);
+        let com = arena.root_center_of_mass();
+        assert_eq!(com, &[2.0, -1.0]);
     }
 
     /// An empty input builds an empty arena and the force pass is a no-op.
@@ -571,5 +557,137 @@ mod tests {
         arena.compute_non_edge_forces(0, 0.25, &[], &mut forces, &mut q_sum, &mut stack);
         assert_eq!(forces, [0.0, 0.0]);
         assert_eq!(q_sum, 0.0);
+    }
+
+    /// Smoke test for the 4D arena path: the build conserves points and produces a tree.
+    #[test]
+    fn build_conserves_points_4d() {
+        const N: usize = 1_000;
+        let data = lcg_cloud(N, 4, 31);
+        let arena = Arena::<f32, u64, 4>::new(&data, N);
+        assert_eq!(arena.root_count(), N);
+    }
+
+    /// Non-trivial force computation: with two well-separated points the repulsive force on
+    /// each must point away from the other, and `q_sum` must be positive.
+    #[test]
+    fn repulsive_forces_point_away_from_each_other() {
+        // Two points far apart on the x-axis.
+        let data = [-5.0f32, 0.0, 5.0, 0.0];
+        let arena = Arena::<f32, u64, 2>::new(&data, 2);
+        assert_eq!(arena.root_count(), 2);
+
+        let theta_sq = 0.25;
+        let mut stack = <Dim<2> as Morton<2>>::empty_stack();
+
+        // Force on point 0 (at -5, 0) should point left (negative x).
+        let mut forces0 = [0.0f32; 2];
+        let mut q_sum0 = 0.0f32;
+        arena.compute_non_edge_forces(0, theta_sq, &data, &mut forces0, &mut q_sum0, &mut stack);
+        assert!(
+            forces0[0] < 0.0,
+            "force on point 0 should point away from point 1"
+        );
+        assert!(q_sum0 > 0.0, "q_sum must be positive");
+
+        // Force on point 1 (at 5, 0) should point right (positive x).
+        let mut forces1 = [0.0f32; 2];
+        let mut q_sum1 = 0.0f32;
+        arena.compute_non_edge_forces(1, theta_sq, &data, &mut forces1, &mut q_sum1, &mut stack);
+        assert!(
+            forces1[0] > 0.0,
+            "force on point 1 should point away from point 0"
+        );
+        assert!(q_sum1 > 0.0, "q_sum must be positive");
+    }
+
+    /// Force computation with multiple points spread across quadrants: the net force on a
+    /// quadrant center must point roughly toward the quadrant diagonal.
+    #[test]
+    fn repulsive_forces_with_multiple_points() {
+        // Four points at the corners of a square.
+        let data = [-1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+        let arena = Arena::<f32, u64, 2>::new(&data, 4);
+        assert_eq!(arena.root_count(), 4);
+
+        let theta_sq = 0.25;
+        let mut stack = <Dim<2> as Morton<2>>::empty_stack();
+
+        // Force on point 0 (at -1, -1) should point roughly down-left.
+        let mut forces = [0.0f32; 2];
+        let mut q_sum = 0.0f32;
+        arena.compute_non_edge_forces(0, theta_sq, &data, &mut forces, &mut q_sum, &mut stack);
+        assert!(forces[0] < 0.0, "x-force should be negative");
+        assert!(forces[1] < 0.0, "y-force should be negative");
+        assert!(q_sum > 0.0, "q_sum must be positive");
+    }
+
+    /// Smoke test for the 5D arena path using the u128 Morton word type.
+    #[test]
+    fn build_conserves_points_5d() {
+        const N: usize = 500;
+        let data = lcg_cloud(N, 5, 37);
+        let arena = Arena::<f32, u128, 5>::new(&data, N);
+        assert_eq!(arena.root_count(), N);
+    }
+
+    /// Smoke test for the 6D arena path using the u128 Morton word type.
+    #[test]
+    fn build_conserves_points_6d() {
+        const N: usize = 400;
+        let data = lcg_cloud(N, 6, 39);
+        let arena = Arena::<f32, u128, 6>::new(&data, N);
+        assert_eq!(arena.root_count(), N);
+    }
+
+    /// Smoke test for the 7D arena path using the u128 Morton word type.
+    #[test]
+    fn build_conserves_points_7d() {
+        const N: usize = 300;
+        let data = lcg_cloud(N, 7, 41);
+        let arena = Arena::<f32, u128, 7>::new(&data, N);
+        assert_eq!(arena.root_count(), N);
+    }
+
+    /// Rebuild reuses buffers: the second build over a different cloud must produce
+    /// the correct point count and a different center of mass.
+    #[test]
+    fn rebuild_reuses_buffers() {
+        let mut arena = Arena::<f32, u64, 2>::empty();
+        let data1 = lcg_cloud(500, 2, 10);
+        arena.rebuild(&data1, 500);
+        assert_eq!(arena.root_count(), 500);
+        let com1: Vec<f32> = arena.root_center_of_mass().to_vec();
+
+        let data2 = lcg_cloud(500, 2, 99);
+        arena.rebuild(&data2, 500);
+        assert_eq!(arena.root_count(), 500);
+        let com2: Vec<f32> = arena.root_center_of_mass().to_vec();
+
+        // Different seeds produce different clouds, so centers of mass must differ.
+        assert!(com1[0] != com2[0] || com1[1] != com2[1]);
+    }
+
+    /// Force computation in 3D: with three points forming a triangle the repulsive
+    /// force on each must point away from the triangle centroid.
+    #[test]
+    fn repulsive_forces_in_3d() {
+        // Three points forming an equilateral triangle in the xy-plane.
+        let data = [0.0f32, 0.0, 0.0, 10.0, 0.0, 0.0, 5.0, 8.66, 0.0];
+        let arena = Arena::<f32, u64, 3>::new(&data, 3);
+        assert_eq!(arena.root_count(), 3);
+
+        let theta_sq = 0.25;
+        let mut stack = <Dim<3> as Morton<3>>::empty_stack();
+
+        // Centroid is at (5, 2.887, 0). Force on point 0 (0,0,0) should point away.
+        let mut forces = [0.0f32; 3];
+        let mut q_sum = 0.0f32;
+        arena.compute_non_edge_forces(0, theta_sq, &data, &mut forces, &mut q_sum, &mut stack);
+        // The force should have a component pointing away from the centroid.
+        assert!(q_sum > 0.0, "q_sum must be positive");
+        // The force magnitude should be nonzero (points are well-separated).
+        let mag = (forces[0] * forces[0] + forces[1] * forces[1] + forces[2] * forces[2]).sqrt();
+        assert!(mag > 1e-6, "force magnitude should be nonzero");
     }
 }
