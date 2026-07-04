@@ -61,7 +61,7 @@ where
     W: barnes_hut_tree::MortonWord,
 {
     /// Morton arena, rebuilt over the embedding each epoch so its buffers persist.
-    arena: barnes_hut_tree::Arena<T, W, D>,
+    arena: barnes_hut_tree::BarnesHutTree<T, W, D>,
     /// Per-sample contribution to the `Q` normalizer, reduced after the force pass.
     /// Sized to the sample count on the first epoch and reused thereafter.
     q_sums: Vec<T>,
@@ -78,7 +78,7 @@ where
 {
     pub(crate) fn new(theta: T) -> Self {
         Self {
-            arena: barnes_hut_tree::Arena::empty(),
+            arena: barnes_hut_tree::BarnesHutTree::empty(),
             q_sums: Vec::new(),
             theta,
             theta_sq: theta * theta,
@@ -103,7 +103,7 @@ where
     ) -> T {
         let n_samples = y.len() / D;
         // Rebuild the Morton arena over the current embedding.
-        self.arena.rebuild(y, n_samples);
+        self.arena.rebuild_uniform(y);
         self.q_sums.resize(n_samples, T::zero());
 
         // Barnes-Hut forces in parallel: a positive and negative chunk per sample, plus its

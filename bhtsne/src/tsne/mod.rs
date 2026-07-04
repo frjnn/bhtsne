@@ -652,11 +652,11 @@ where
 {
     // Get estimate of normalization term.
     let q_sum = {
-        let arena = barnes_hut_tree::Arena::<
+        let arena = barnes_hut_tree::BarnesHutTree::<
             T,
             <barnes_hut_tree::Dim<D> as barnes_hut_tree::Morton<D>>::Word,
             D,
-        >::new(y, n_samples);
+        >::new_uniform(y);
         let theta_sq = theta * theta;
         let mut q_sums: Vec<T> = vec![T::zero(); n_samples];
 

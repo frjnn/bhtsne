@@ -16,7 +16,10 @@ use num_traits::Float;
 
 use rayon::prelude::*;
 
-use crate::morton::{Dim, Morton, MortonWord, quantize};
+use crate::{
+    ForceKernel,
+    morton::{Dim, Morton, MortonWord, quantize},
+};
 
 /// Minimum sample count before parallel rayon iterations use `with_min_len` to avoid
 /// overhead on small workloads.
@@ -37,17 +40,25 @@ const SLACK_FRACTION: f64 = 0.03;
 /// dead cells. `child_count` is at most `2^D`.
 #[derive(Debug)]
 struct Node<T, const D: usize> {
+    /// Mass-weighted center of mass of the points the cell contains.
     center_of_mass: [T; D],
+    /// Summed mass of the points the cell contains. `T::from(count)` under
+    /// `rebuild_uniform`, the sum of caller-supplied per-point masses under `rebuild`.
+    mass: T,
+    /// Number of points the cell contains, guarded by the point-conservation invariant.
     count: u32,
+    /// Arena index of the first child, or [`SENTINEL`] for a leaf.
     first_child: u32,
+    /// Number of contiguous children starting at `first_child`.
     child_count: u8,
+    /// Tree level, indexing the per-tree squared half-width table.
     level: u8,
 }
 
 /// A Morton linear tree over the embedding, in one arena, for `D` in `{2, 3, 4, 5, 6, 7}`.
 /// `W` is the Morton code word type: `u64` for `D <= 4` and `u128` for `D >= 5`.
 #[derive(Debug)]
-pub struct Arena<T, W, const D: usize>
+pub struct BarnesHutTree<T, W, const D: usize>
 where
     W: MortonWord,
 {
@@ -95,7 +106,7 @@ where
         )
 }
 
-impl<T, W, const D: usize> Arena<T, W, D>
+impl<T, W, const D: usize> BarnesHutTree<T, W, D>
 where
     T: Float + Send + Sync + AddAssign,
     W: MortonWord,
@@ -117,34 +128,81 @@ where
         self.nodes.first().map_or(0, |node| node.count as usize)
     }
 
-    /// Builds a fresh arena over `y`, a flat buffer of `n_samples` points of `D` components each.
-    /// Convenience for one-shot callers and tests; the epoch loop instead holds one arena and calls
-    /// [`Arena::rebuild`] so the buffers persist and are reused.
+    /// Builds a fresh arena over `points`, a flat `masses.len() * D` buffer, weighted by
+    /// `masses`. Every mass must be strictly positive: a cell of zero total mass has no
+    /// well-defined center of mass.
     ///
     /// # Panics
     ///
-    /// If the leaf masses do not sum to `n_samples` (point conservation), which a correct Morton
-    /// build always satisfies.
-    pub fn new(y: &[T], n_samples: usize) -> Self
+    /// If `points.len() != masses.len() * D`.
+    pub fn new(points: &[T], masses: &[T]) -> Self
     where
         Dim<D>: Morton<D, Word = W>,
     {
-        let mut arena = Self::empty();
-        arena.rebuild(y, n_samples);
+        let mut tree = Self::empty();
+        tree.rebuild(points, masses);
 
-        arena
+        tree
     }
 
-    /// Rebuilds the arena over `y`, a flat buffer of `n_samples` points of `D` components each, in
-    /// place, reusing the retained buffers rather than reallocating them each epoch.
+    /// Builds a fresh arena over `points` with unit mass per point. Internal cell mass then
+    /// equals `T::from(count)`, matching t-SNE's count-weighted arena.
     ///
     /// # Panics
     ///
-    /// If the leaf masses do not sum to `n_samples` (point conservation), which a correct Morton
-    /// build always satisfies.
-    pub fn rebuild(&mut self, y: &[T], n_samples: usize)
+    /// If `points.len() % D != 0`.
+    pub fn new_uniform(points: &[T]) -> Self
     where
         Dim<D>: Morton<D, Word = W>,
+    {
+        let mut tree = Self::empty();
+        tree.rebuild_uniform(points);
+
+        tree
+    }
+
+    /// Rebuilds over `points` weighted by `masses`, in place, reusing the retained buffers.
+    /// See [`BarnesHutTree::new`] for the mass contract.
+    ///
+    /// # Panics
+    ///
+    /// If `points.len() != masses.len() * D`.
+    pub fn rebuild(&mut self, points: &[T], masses: &[T])
+    where
+        Dim<D>: Morton<D, Word = W>,
+    {
+        assert_eq!(
+            points.len(),
+            masses.len() * D,
+            "points must hold masses.len() points of D components each"
+        );
+        self.rebuild_impl(points, masses.len(), |index| masses[index]);
+    }
+
+    /// Rebuilds over `points` with unit mass per point, in place, reusing the retained
+    /// buffers.
+    ///
+    /// # Panics
+    ///
+    /// If `points.len() % D != 0`.
+    pub fn rebuild_uniform(&mut self, points: &[T])
+    where
+        Dim<D>: Morton<D, Word = W>,
+    {
+        assert_eq!(
+            points.len() % D,
+            0,
+            "points must hold a whole number of D-component points"
+        );
+        self.rebuild_impl(points, points.len() / D, |_| T::one());
+    }
+
+    /// Shared rebuild body. `mass_of` returns the mass of point `index`, the only difference
+    /// between the mass-weighted and uniform entry points.
+    fn rebuild_impl<F>(&mut self, points: &[T], n_samples: usize, mass_of: F)
+    where
+        Dim<D>: Morton<D, Word = W>,
+        F: Fn(usize) -> T + Sync,
     {
         let bits = <Dim<D> as Morton<D>>::BITS;
 
@@ -157,7 +215,7 @@ where
             return;
         }
 
-        let (y_chunks, _) = y.as_chunks::<D>();
+        let (y_chunks, _) = points.as_chunks::<D>();
 
         // 1. Bounding box and the derived quantization scale.
         let (min, max) = bounding_box::<T, D>(y_chunks);
@@ -212,6 +270,7 @@ where
         ranges.reserve(2 * n_samples - 1);
         nodes.push(Node {
             center_of_mass: [T::zero(); D],
+            mass: T::zero(),
             count: n_samples as u32,
             first_child: SENTINEL,
             child_count: 0,
@@ -250,6 +309,7 @@ where
                 }
                 nodes.push(Node {
                     center_of_mass: [T::zero(); D],
+                    mass: T::zero(),
                     count: (child_end - child_start),
                     first_child: SENTINEL,
                     child_count: 0,
@@ -266,9 +326,10 @@ where
             node += 1;
         }
 
-        // 6a. Leaf centers of mass: the mean of the leaf's member points, computed in parallel
-        // per leaf. Internal centers come from the bottom-up reduction below. `count` is already
-        // set (the range length) for every node, so only the centers remain.
+        // 6a. Leaf mass and mass-weighted center of mass, computed in parallel per leaf.
+        // Internal centers come from the bottom-up reduction below. `count` is already set (the
+        // range length) for every node, so only the summary remains.
+        let mass_ref = &mass_of;
         nodes
             .par_iter_mut()
             .zip(ranges.par_iter())
@@ -276,47 +337,52 @@ where
             .filter(|(node, _)| node.first_child == SENTINEL)
             .for_each(|(node, &(start, end))| {
                 let mut center = [T::zero(); D];
+                let mut total = T::zero();
                 for slot in start..end {
                     let index = sorted[slot as usize].1 as usize;
+                    let weight = mass_ref(index);
+                    total += weight;
                     let point = &y_chunks[index];
                     center
                         .iter_mut()
                         .zip(point.iter())
-                        .for_each(|(ci, pi)| *ci += *pi);
+                        .for_each(|(ci, pi)| *ci += weight * *pi);
                 }
-                let inverse = T::from(node.count).unwrap().recip();
+                let inverse = total.recip();
                 center
                     .iter_mut()
                     .for_each(|value| *value = *value * inverse);
+                node.mass = total;
                 node.center_of_mass = center;
             });
 
-        // 6b. Internal centers of mass, bottom up. Children always have a higher arena index than
-        // their parent (breadth-first emission), so a reverse pass sees every child finished, a
-        // count-weighted hierarchical average.
+        // 6b. Internal mass and mass-weighted center of mass, bottom up. Children always have a
+        // higher arena index than their parent (breadth-first emission), so a reverse pass sees
+        // every child finished.
         for node in (0..nodes.len()).rev() {
             if nodes[node].first_child == SENTINEL {
                 continue;
             }
             let first_child = nodes[node].first_child as usize;
             let child_count = nodes[node].child_count as usize;
-            let total = T::from(nodes[node].count).unwrap();
             let mut center = [T::zero(); D];
+            let mut total = T::zero();
             for child in &nodes[first_child..first_child + child_count] {
-                let weight = T::from(child.count).unwrap();
+                total += child.mass;
                 center
                     .iter_mut()
                     .zip(child.center_of_mass.iter())
-                    .for_each(|(value, &component)| *value += component * weight);
+                    .for_each(|(value, &component)| *value += component * child.mass);
             }
             let inverse = total.recip();
             center
                 .iter_mut()
                 .for_each(|value| *value = *value * inverse);
+            nodes[node].mass = total;
             nodes[node].center_of_mass = center;
         }
 
-        // Point conservation: every input point lands in exactly one leaf, so the leaf masses
+        // Point conservation: every input point lands in exactly one leaf, so the leaf counts
         // must sum to the input count. Morton quantization guarantees this in exact arithmetic,
         // and the check guards the breadth-first range bookkeeping in debug builds.
         debug_assert_eq!(
@@ -393,13 +459,103 @@ where
 
             // Summarize the cell by its center of mass.
             let inverse = (T::one() + distance).recip();
-            let mut magnitude = T::from(node.count).unwrap() * inverse;
+            let mut magnitude = node.mass * inverse;
             *q_sum += magnitude;
             magnitude = magnitude * inverse;
             for axis in 0..D {
                 negative_forces_row[axis] += magnitude * displacement[axis];
             }
         }
+    }
+
+    /// Accumulates the Barnes-Hut force on `query` (`D` components) into `force`, applying
+    /// `kernel` to every summarised cell. Iterative traversal using `stack` as scratch, at
+    /// least [`Morton::Stack`] entries wide.
+    ///
+    /// A cell is summarised when it is a leaf or passes the theta test, otherwise its
+    /// children are pushed. Zero-distance cells (the query's own leaf) are skipped.
+    /// `theta == 0` descends to leaves and is exact.
+    ///
+    /// # Panics
+    ///
+    /// If `query.len() < D`, or if `stack` is shorter than [`Morton::Stack`] for `D`.
+    pub fn accumulate_forces<K>(
+        &self,
+        query: &[T],
+        theta: T,
+        kernel: &K,
+        force: &mut [T; D],
+        stack: &mut [u32],
+    ) where
+        K: ForceKernel<T, D>,
+    {
+        if self.nodes.is_empty() {
+            return;
+        }
+        assert!(query.len() >= D, "query must hold at least D components");
+
+        let theta_sq = theta * theta;
+        let mut top = 0usize;
+        stack[top] = 0;
+        top += 1;
+        while top > 0 {
+            top -= 1;
+            let node = &self.nodes[stack[top] as usize];
+
+            let mut displacement = [T::zero(); D];
+            let mut distance_sq = T::zero();
+            for axis in 0..D {
+                let delta = query[axis] - node.center_of_mass[axis];
+                displacement[axis] = delta;
+                distance_sq += delta * delta;
+            }
+
+            let is_leaf = node.first_child == SENTINEL;
+            if is_leaf {
+                // Skip the query's own leaf (zero displacement), excluding the self-interaction
+                // and guarding the kernel from a zero-distance singularity.
+                if distance_sq <= T::zero() {
+                    continue;
+                }
+            } else if self.level_half_width_sq[node.level as usize] >= theta_sq * distance_sq {
+                for child in 0..node.child_count as u32 {
+                    stack[top] = node.first_child + child;
+                    top += 1;
+                }
+                continue;
+            }
+
+            kernel.accumulate(&displacement, distance_sq, node.mass, is_leaf, force);
+        }
+    }
+
+    /// Parallel driver over [`BarnesHutTree::accumulate_forces`]: force on every
+    /// `D`-component row of `queries` into the matching row of `out`. Each row runs on its
+    /// own rayon task with a stack-allocated traversal stack. `out` is overwritten per row.
+    ///
+    /// # Panics
+    ///
+    /// If `queries.len() % D != 0`, or `out.len() != queries.len()`.
+    pub fn accumulate_all<K>(&self, queries: &[T], theta: T, kernel: &K, out: &mut [T])
+    where
+        K: ForceKernel<T, D> + Sync,
+        Dim<D>: Morton<D, Word = W>,
+    {
+        assert_eq!(
+            queries.len() % D,
+            0,
+            "queries must hold a whole number of D-component points"
+        );
+        assert_eq!(queries.len(), out.len(), "out must match queries in length");
+
+        out.par_chunks_mut(D)
+            .zip(queries.par_chunks(D))
+            .with_min_len(ARENA_MIN_CHUNK)
+            .for_each_init(<Dim<D> as Morton<D>>::empty_stack, |stack, (row, query)| {
+                let mut force = [T::zero(); D];
+                self.accumulate_forces(query, theta, kernel, &mut force, stack.as_mut());
+                row.copy_from_slice(&force);
+            });
     }
 }
 
@@ -440,7 +596,7 @@ where
 }
 
 #[cfg(test)]
-impl<T, W, const D: usize> Arena<T, W, D>
+impl<T, W, const D: usize> BarnesHutTree<T, W, D>
 where
     W: MortonWord,
 {
@@ -498,7 +654,7 @@ mod tests {
         for value in data.iter_mut() {
             *value += 100.0;
         }
-        let arena = Arena::<f32, u64, 2>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -506,7 +662,7 @@ mod tests {
     fn build_conserves_points_3d() {
         const N: usize = 1_500;
         let data = lcg_cloud(N, 3, 23);
-        let arena = Arena::<f32, u64, 3>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u64, 3>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -515,7 +671,7 @@ mod tests {
     fn root_center_of_mass_equals_the_mean() {
         const N: usize = 1_000;
         let data = lcg_cloud(N, 2, 5);
-        let arena = Arena::<f32, u64, 2>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         let expected = mean::<2>(&data, N);
         let root = arena.root_center_of_mass();
         assert!((root[0] - expected[0]).abs() < 1e-3);
@@ -528,7 +684,7 @@ mod tests {
     fn duplicate_points_collapse_to_one_leaf() {
         const N: usize = 500;
         let data = vec![3.5f32; N * 2];
-        let arena = Arena::<f32, u64, 2>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
         // All identical: the root itself is the single collapsed leaf.
         assert_eq!(arena.node_count(), 1);
@@ -539,7 +695,7 @@ mod tests {
     #[test]
     fn single_point_builds_a_leaf_root() {
         let data = [2.0f32, -1.0];
-        let arena = Arena::<f32, u64, 2>::new(&data, 1);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         assert_eq!(arena.root_count(), 1);
         assert_eq!(arena.node_count(), 1);
         let com = arena.root_center_of_mass();
@@ -549,7 +705,7 @@ mod tests {
     /// An empty input builds an empty arena and the force pass is a no-op.
     #[test]
     fn empty_input_builds_empty_arena() {
-        let arena = Arena::<f32, u64, 2>::new(&[], 0);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&[]);
         assert_eq!(arena.root_count(), 0);
         let mut forces = [0.0f32; 2];
         let mut q_sum = 0.0f32;
@@ -564,7 +720,7 @@ mod tests {
     fn build_conserves_points_4d() {
         const N: usize = 1_000;
         let data = lcg_cloud(N, 4, 31);
-        let arena = Arena::<f32, u64, 4>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u64, 4>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -574,7 +730,7 @@ mod tests {
     fn repulsive_forces_point_away_from_each_other() {
         // Two points far apart on the x-axis.
         let data = [-5.0f32, 0.0, 5.0, 0.0];
-        let arena = Arena::<f32, u64, 2>::new(&data, 2);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         assert_eq!(arena.root_count(), 2);
 
         let theta_sq = 0.25;
@@ -607,7 +763,7 @@ mod tests {
     fn repulsive_forces_with_multiple_points() {
         // Four points at the corners of a square.
         let data = [-1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
-        let arena = Arena::<f32, u64, 2>::new(&data, 4);
+        let arena = BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
         assert_eq!(arena.root_count(), 4);
 
         let theta_sq = 0.25;
@@ -627,7 +783,7 @@ mod tests {
     fn build_conserves_points_5d() {
         const N: usize = 500;
         let data = lcg_cloud(N, 5, 37);
-        let arena = Arena::<f32, u128, 5>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u128, 5>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -636,7 +792,7 @@ mod tests {
     fn build_conserves_points_6d() {
         const N: usize = 400;
         let data = lcg_cloud(N, 6, 39);
-        let arena = Arena::<f32, u128, 6>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u128, 6>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -645,7 +801,7 @@ mod tests {
     fn build_conserves_points_7d() {
         const N: usize = 300;
         let data = lcg_cloud(N, 7, 41);
-        let arena = Arena::<f32, u128, 7>::new(&data, N);
+        let arena = BarnesHutTree::<f32, u128, 7>::new_uniform(&data);
         assert_eq!(arena.root_count(), N);
     }
 
@@ -653,14 +809,14 @@ mod tests {
     /// the correct point count and a different center of mass.
     #[test]
     fn rebuild_reuses_buffers() {
-        let mut arena = Arena::<f32, u64, 2>::empty();
+        let mut arena = BarnesHutTree::<f32, u64, 2>::empty();
         let data1 = lcg_cloud(500, 2, 10);
-        arena.rebuild(&data1, 500);
+        arena.rebuild_uniform(&data1);
         assert_eq!(arena.root_count(), 500);
         let com1: Vec<f32> = arena.root_center_of_mass().to_vec();
 
         let data2 = lcg_cloud(500, 2, 99);
-        arena.rebuild(&data2, 500);
+        arena.rebuild_uniform(&data2);
         assert_eq!(arena.root_count(), 500);
         let com2: Vec<f32> = arena.root_center_of_mass().to_vec();
 
@@ -674,7 +830,7 @@ mod tests {
     fn repulsive_forces_in_3d() {
         // Three points forming an equilateral triangle in the xy-plane.
         let data = [0.0f32, 0.0, 0.0, 10.0, 0.0, 0.0, 5.0, 8.66, 0.0];
-        let arena = Arena::<f32, u64, 3>::new(&data, 3);
+        let arena = BarnesHutTree::<f32, u64, 3>::new_uniform(&data);
         assert_eq!(arena.root_count(), 3);
 
         let theta_sq = 0.25;
