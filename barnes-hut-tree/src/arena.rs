@@ -1,14 +1,12 @@
-//! Morton (Z-order) linear quadtree in a contiguous arena, the Barnes-Hut tree the optimization
-//! loop summarizes repulsive forces over.
+//! Morton (Z-order) linear tree in a contiguous arena, the Barnes-Hut tree the optimization loop
+//! summarizes repulsive forces over.
 //!
 //! Every cell lives in one [`Vec<Node>`]. The build quantizes the embedding into per-axis integer
 //! coordinates, interleaves them into Morton codes, sorts a `(code, index)` permutation, and walks
 //! the sorted codes breadth first to emit nodes whose children occupy a contiguous arena range
 //! reached through `first_child`. A cell stores only the summary the traversal reads (center of
-//! mass, count, level), never raw coordinates.
-//!
-//! Morton quantization is total, so every point maps to exactly one cell and point conservation is
-//! automatic, which the build asserts (leaf masses sum to `n`).
+//! mass, mass, level), never raw coordinates. Morton quantization is total, so every point maps
+//! to exactly one cell, which the build asserts (leaf counts sum to `n`).
 
 use std::{array, ops::AddAssign};
 
@@ -31,18 +29,17 @@ const SENTINEL: u32 = u32::MAX;
 /// Slack fraction.
 const SLACK_FRACTION: f64 = 0.03;
 
-/// One cell of the arena. The Barnes-Hut traversal reads `center_of_mass`, `count`, and `level`
+/// One cell of the arena. The Barnes-Hut traversal reads `center_of_mass`, `mass`, and `level`
 /// (which sizes the cell through the per-tree half-width table), and follows `first_child` for the
 /// `child_count` children stored contiguously. A leaf is marked by `first_child == SENTINEL`.
-///
-/// Children are only the non-empty orthants of a cell, stored back to back, rather than a fixed
-/// `2^D` slots: empty orthants are never emitted, which keeps the arena lean and the traversal off
-/// dead cells. `child_count` is at most `2^D`.
+/// Children are the non-empty orthants of a cell, stored back to back rather than as fixed `2^D`
+/// slots, which keeps the arena lean and the traversal off dead cells. `child_count` is at most
+/// `2^D`.
 #[derive(Debug)]
 struct Node<T, const D: usize> {
     /// Mass-weighted center of mass of the points the cell contains.
     center_of_mass: [T; D],
-    /// Summed mass of the points the cell contains. `T::from(count)` under
+    /// Summed mass of the points the cell contains. Equals `T::from(count)` under
     /// `rebuild_uniform`, the sum of caller-supplied per-point masses under `rebuild`.
     mass: T,
     /// Number of points the cell contains, guarded by the point-conservation invariant.
@@ -260,12 +257,10 @@ where
         let nodes = &mut self.nodes;
         let ranges = &mut self.ranges;
 
-        // 5. Breadth-first emission: each node's children (the non-empty orthant groups at the
-        // node's tightest enclosing level) occupy a contiguous arena range. `ranges` carries each
-        // node's window in `sorted`. Every internal node has at least two children (single-child
-        // chains are skipped by the tightest-enclosing-level jump), so an arena over `n` points
-        // holds at most `2n - 1` nodes; reserving that up front lets the sequential emission push
-        // without reallocating (a no-op once the buffers have grown on the first epoch).
+        // 5. Breadth-first emission: each node's children (the non-empty orthant groups at its
+        // tightest enclosing level) occupy a contiguous arena range, and `ranges` carries each
+        // node's window in `sorted`. Internal nodes always have at least two children, so an
+        // arena over `n` points holds at most `2n - 1` nodes.
         nodes.reserve(2 * n_samples - 1);
         ranges.reserve(2 * n_samples - 1);
         nodes.push(Node {
@@ -282,16 +277,16 @@ where
         let mut node = 0usize;
         while node < nodes.len() {
             let (start, end) = ranges[node];
-            // A single point, or a cell of points that share a full code (closer than one grid
-            // cell, the duplicate case), is a leaf. Sorted codes make the all-equal test O(1).
+            // A single point, or a cell of points sharing a full code (closer than one grid
+            // cell), is a leaf.
             if end - start <= 1 || sorted[start as usize].0 == sorted[(end - 1) as usize].0 {
                 node += 1;
                 continue;
             }
 
-            // Tightest enclosing level: the highest bit at which the range's extreme codes differ
-            // sits in the D-bit group that first splits the range, so the node skips straight to
-            // that level rather than emitting single-child chains.
+            // Tightest enclosing level: the highest bit at which the range's extreme codes
+            // differ sits in the D-bit group that first splits the range, skipping single-child
+            // chains.
             let xor = sorted[start as usize].0 ^ sorted[(end - 1) as usize].0;
             let highest_diff = xor.msb_position();
             let level = (bits - 1) - highest_diff / D as u32;
@@ -326,9 +321,8 @@ where
             node += 1;
         }
 
-        // 6a. Leaf mass and mass-weighted center of mass, computed in parallel per leaf.
-        // Internal centers come from the bottom-up reduction below. `count` is already set (the
-        // range length) for every node, so only the summary remains.
+        // 6a. Leaf mass and mass-weighted center of mass, per leaf in parallel. Internal
+        // centers come from the bottom-up reduction below.
         let mass_ref = &mass_of;
         nodes
             .par_iter_mut()
@@ -356,9 +350,8 @@ where
                 node.center_of_mass = center;
             });
 
-        // 6b. Internal mass and mass-weighted center of mass, bottom up. Children always have a
-        // higher arena index than their parent (breadth-first emission), so a reverse pass sees
-        // every child finished.
+        // 6b. Internal mass and mass-weighted center of mass, bottom up. Children always sit
+        // at a higher arena index than their parent.
         for node in (0..nodes.len()).rev() {
             if nodes[node].first_child == SENTINEL {
                 continue;
