@@ -64,6 +64,7 @@ plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend",
     "bitmap_encoder",
     "point_series",
+    "ttf",
 ] }
 npyz = { version = "0.9", features = ["npz"] }
 chrono = "0.4"
@@ -76,3 +77,7 @@ name = "affinities"
 [[bench]]
 harness = false
 name = "tsne"
+
+[[bench]]
+harness = false
+name = "spectral_init"

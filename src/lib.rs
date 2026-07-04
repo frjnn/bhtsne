@@ -72,7 +72,13 @@ pub use {
     rustfft::FftNum,
     tsne::interpolation::FftDim,
     tsne::morton::{Dim, Morton},
+    tsne::spectral::{SpectralBlock, SpectralParams},
 };
+
+/// Monomorphized spectral solver captured by [`tSNE::spectral_init_with`], where the
+/// [`SpectralBlock`] bound is available, and invoked by the seeding step of the fit,
+/// where it is not.
+type SpectralSeeder<T> = fn(&[usize], &[u32], &[T], SpectralParams) -> Vec<T>;
 
 use rayon::{
     iter::{
@@ -170,6 +176,7 @@ where
     gains: Vec<T>,
     epoch_callback: Option<EpochCallback<'data, T>>,
     initial_embedding: Option<Vec<T>>,
+    spectral_init: Option<(SpectralParams, SpectralSeeder<T>)>,
     stop_lying_fired: bool,
     cached_perplexity: Option<T>,
     fit: Option<Fit<T>>,
@@ -259,6 +266,7 @@ where
             gains: Vec::new(),
             epoch_callback: None,
             initial_embedding: None,
+            spectral_init: None,
             stop_lying_fired: false,
             cached_perplexity: None,
             fit: None,
@@ -430,6 +438,57 @@ where
     /// `embedding` - row-major initial coordinates.
     pub fn initial_embedding(&mut self, embedding: impl Into<Vec<T>>) -> &mut Self {
         self.initial_embedding = Some(embedding.into());
+
+        self
+    }
+
+    /// Use spectral embedding initialization instead of random, with the default
+    /// [`SpectralParams`].
+    ///
+    /// Computes a low-dimensional embedding from the affinity graph's normalized
+    /// Laplacian via Chebyshev-filtered subspace iteration with Rayleigh-Ritz
+    /// projections. This typically produces better-separated clusters than random
+    /// initialization, especially for well-structured data.
+    ///
+    /// Use [`spectral_init_with`] to tune the solver parameters.
+    ///
+    /// If an explicit [`initial_embedding`] is also set, it takes precedence and
+    /// this flag is ignored.
+    ///
+    /// [`initial_embedding`]: tSNE::initial_embedding
+    /// [`spectral_init_with`]: tSNE::spectral_init_with
+    pub fn spectral_init(&mut self) -> &mut Self
+    where
+        T: Default,
+        Dim<D>: SpectralBlock,
+    {
+        self.spectral_init_with(SpectralParams::default())
+    }
+
+    /// Use spectral embedding initialization instead of random, with custom
+    /// [`SpectralParams`].
+    ///
+    /// ```
+    /// use bhtsne::{SpectralParams, tSNE};
+    ///
+    /// let data: Vec<f32> = vec![0.0; 100 * 4];
+    /// let samples: Vec<&[f32]> = data.chunks(4).collect();
+    /// let mut tsne: tSNE<f32, &[f32]> = tSNE::new(&samples);
+    /// tsne.spectral_init_with(SpectralParams::new().rounds(3).degree(12));
+    /// ```
+    ///
+    /// If an explicit [`initial_embedding`] is also set, it takes precedence and
+    /// this setting is ignored. The solver is monomorphized here, where the
+    /// [`SpectralBlock`] bound is available, so the seeding inside the fit needs no
+    /// bound of its own.
+    ///
+    /// [`initial_embedding`]: tSNE::initial_embedding
+    pub fn spectral_init_with(&mut self, params: SpectralParams) -> &mut Self
+    where
+        T: Default,
+        Dim<D>: SpectralBlock,
+    {
+        self.spectral_init = Some((params, tsne::spectral::spectral_embedding::<T, D>));
 
         self
     }
@@ -668,7 +727,7 @@ where
             tsne::stop_lying(&mut self.p_values, self.early_exaggeration);
         }
 
-        // Seed from the supplied embedding if any, otherwise initialize randomly.
+        // Seed: explicit embedding > spectral init > random.
         match self.initial_embedding.take() {
             Some(init) => {
                 assert_eq!(
@@ -680,7 +739,13 @@ where
                 );
                 self.y.iter_mut().zip(&init).for_each(|(y, &v)| *y = v);
             }
-            None => tsne::random_init(&mut self.y),
+            None => match self.spectral_init {
+                Some((params, seeder)) => {
+                    let seed = seeder(&self.p_rows, &self.p_columns, &self.p_values, params);
+                    self.y.iter_mut().zip(&seed).for_each(|(y, &v)| *y = v);
+                }
+                None => tsne::random_init(&mut self.y),
+            },
         }
     }
 
@@ -1036,6 +1101,49 @@ where
         })
     }
 
+    /// Computes the spectral embedding of the affinity graph and returns it as a
+    /// row-major matrix of `n * D` values, without touching the fitting state. To
+    /// seed a fit with it, use [`spectral_init`] instead, or pass the result to
+    /// [`initial_embedding`].
+    ///
+    /// Runs a Chebyshev-filtered subspace iteration on the shifted similarity
+    /// matrix `M = (I + D^{-1/2} P D^{-1/2}) / 2` with a fixed budget of sparse
+    /// matvecs, extracting the leading nontrivial eigenvector estimates with
+    /// Rayleigh-Ritz projections. The result separates well-connected components
+    /// and is suitable as a t-SNE seed.
+    ///
+    /// Uses the affinity graph already built by [`barnes_hut`] or provided via
+    /// [`with_affinities`]. Available for the dimensionalities carrying a
+    /// [`SpectralBlock`] impl.
+    ///
+    /// [`spectral_init`]: tSNE::spectral_init
+    /// [`initial_embedding`]: tSNE::initial_embedding
+    /// [`barnes_hut`]: tSNE::barnes_hut
+    /// [`with_affinities`]: tSNE::with_affinities
+    pub fn spectral_embedding(&self) -> Vec<T>
+    where
+        T: Default,
+        Dim<D>: SpectralBlock,
+    {
+        self.spectral_embedding_with(SpectralParams::default())
+    }
+
+    /// Same as [`spectral_embedding`], with custom [`SpectralParams`].
+    ///
+    /// [`spectral_embedding`]: tSNE::spectral_embedding
+    pub fn spectral_embedding_with(&self, params: SpectralParams) -> Vec<T>
+    where
+        T: Default,
+        Dim<D>: SpectralBlock,
+    {
+        tsne::spectral::spectral_embedding::<T, D>(
+            &self.p_rows,
+            &self.p_columns,
+            &self.p_values,
+            params,
+        )
+    }
+
     /// Injects a previously extracted affinity graph. The next `barnes_hut`
     /// call will reuse it and skip the neighbor search.
     ///
@@ -1248,8 +1356,6 @@ where
     }
 }
 
-/// Copies sample `index`'s precomputed neighbor row (indices and distances) into the
-/// affinity-build buffers.
 #[inline]
 fn copy_neighbor_row<T: Copy>(
     neighbors: &[Vec<Neighbor<T>>],

@@ -51,9 +51,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let t1 = Instant::now();
     let mut tsne: tSNE<f64, &[f32]> = tSNE::new(&rows);
     tsne.perplexity(PERPLEXITY)
+        .spectral_init()
         .epochs(EPOCHS)
         .epoch_callback(|epoch, _embedding| {
-            if epoch % 100 == 0 || epoch == EPOCHS - 1 {
+            if epoch % 100 == 0 {
                 println!("  epoch {epoch}/{EPOCHS}");
             }
         })
@@ -74,12 +75,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let kl = tsne.kl_divergence().unwrap_or(f64::NAN);
 
     println!("t-SNE done: KL divergence {kl:.4}");
-
-    let csv_out = "mnist_pca20_tsne.csv";
+    let csv_out = "mnist_pca20_tsne_spectral.csv";
     tsne.write_csv(csv_out)?;
     println!("Embedding written to {csv_out} ({n_samples} rows, 2 columns)");
 
-    let png_out = "mnist_pca20_tsne.png";
+    let png_out = "mnist_pca20_tsne_spectral.png";
     println!("Writing scatter plot to {png_out}...");
     plot_embedding(&embedding, &labels, png_out, load_ms, tsne_ms)?;
     println!("Done");

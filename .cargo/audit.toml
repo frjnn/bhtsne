@@ -1,0 +1,6 @@
+[advisories]
+# RUSTSEC-2026-0192: ttf-parser is unmaintained. Dev-only dependency reached
+# through the plotters ttf feature (plotters -> font-kit -> ttf-parser), used
+# exclusively to render text in the example plots. It never ships in the
+# published library, and no vulnerability is involved.
+ignore = ["RUSTSEC-2026-0192"]
