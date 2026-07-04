@@ -10,11 +10,11 @@
 </div>
 
 
-Morton (Z-order) linear tree in a contiguous arena for spatial force approximation, the space-partitioning structure the Barnes-Hut algorithm walks when summarizing repulsive forces from distant points. Companion crate to [`bhtsne`](https://crates.io/crates/bhtsne), published standalone so any other force-approximation problem can reuse it without depending on the tSNE optimizer.
+Morton (Z-order) linear tree in a contiguous arena for spatial force approximation, the structure the Barnes-Hut algorithm walks to summarize repulsive forces from distant points. Companion crate to [`bhtsne`](https://crates.io/crates/bhtsne), published standalone so any other force-approximation problem can reuse it without the tSNE optimizer.
 
-Embedding dimensionality `D` runs from 2 to 7. The `Morton<D>` trait picks the code word type per `D`: `Dim<2>`, `Dim<3>`, and `Dim<4>` interleave into a `u64` (32, 21, and 16 bits per axis), while `Dim<5>`, `Dim<6>`, and `Dim<7>` need more than 64 bits after interleaving and use a `u128` (25, 21, and 18 bits per axis). Every codec roundtrips losslessly on its bit width.
+Embedding dimensionality `D` runs 2 to 7. The `Morton<D>` trait picks the code word type per `D`: `Dim<2>`, `Dim<3>`, and `Dim<4>` interleave into a `u64` (32, 21, and 16 bits per axis), while `Dim<5>`, `Dim<6>`, and `Dim<7>` use a `u128` (25, 21, and 18 bits per axis).
 
-An `Arena<T, W, D>` owns the flat node buffer, the sorted `(code, index)` permutation, and the per-level squared half-widths the theta acceptance test compares against. Rebuilding it in place reuses those buffers across epochs, so a long fit allocates only on the first rebuild. Each rebuild quantizes the embedding into per-axis integer coordinates, interleaves them into Morton codes, sorts the `(code, index)` permutation in parallel, and walks the sorted codes breadth first to emit cells whose children sit contiguously in the arena and are reached through a `first_child` index. The traversal reads `center_of_mass`, `count`, and `level` from every cell it visits, and follows `first_child` when the theta test rejects a summary.
+`BarnesHutTree<T, W, D>` owns the flat node buffer, the sorted `(code, index)` permutation, and the per-level squared half-widths the theta test compares against. Rebuilding it in place reuses those buffers, so a long fit allocates only on the first rebuild. Each rebuild quantizes the points into per-axis integer coordinates, interleaves them into Morton codes, sorts the `(code, index)` permutation in parallel, and walks the sorted codes breadth first to emit cells whose children sit contiguously in the arena. The traversal reads `center_of_mass`, `mass`, and `level` per cell, and follows `first_child` when the theta test rejects a summary.
 
 ## Installation
 
@@ -27,7 +27,7 @@ barnes-hut-tree = "0.1"
 ## Example
 
 ```rust
-use barnes_hut_tree::{Arena, Dim, Morton};
+use barnes_hut_tree::{BarnesHutTree, Dim, Morton};
 
 // Build a 3D arena over four points.
 let embedding: Vec<f32> = vec![
@@ -36,15 +36,15 @@ let embedding: Vec<f32> = vec![
     0.0, 1.0, 0.0,
     0.0, 0.0, 1.0,
 ];
-let arena: Arena<f32, <Dim<3> as Morton<3>>::Word, 3> =
-    Arena::new(&embedding, embedding.len() / 3);
+let tree: BarnesHutTree<f32, <Dim<3> as Morton<3>>::Word, 3> =
+    BarnesHutTree::new_uniform(&embedding);
 
 // Approximate the repulsive force on point 0 and its contribution to the Q normalizer.
 let theta_sq = 0.5f32 * 0.5;
 let mut stack = <Dim<3> as Morton<3>>::empty_stack();
 let mut forces = [0.0f32; 3];
 let mut q_sum = 0.0f32;
-arena.compute_non_edge_forces(
+tree.compute_non_edge_forces(
     0,
     theta_sq,
     &embedding,
@@ -56,7 +56,7 @@ arena.compute_non_edge_forces(
 
 ## Parallelism
 
-Built on [rayon](https://github.com/rayon-rs/rayon), the arena build and the force reductions run on whatever thread pool the caller runs in. See [rayon's FAQ](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for the physical versus logical cores discussion.
+Built on [rayon](https://github.com/rayon-rs/rayon), the arena build and force reductions run on whatever thread pool the caller runs in. See [rayon's FAQ](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for the physical versus logical cores discussion.
 
 ## License
 

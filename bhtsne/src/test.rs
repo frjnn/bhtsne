@@ -1159,7 +1159,7 @@ fn barnes_hut_is_stable_run_to_run() {
 /// Regression test for the parallel build, white box, the phantom-mass class. A corrupted
 /// aggregation that counts mass a cell does not hold (an empty orthant, a stale cursor) drags the
 /// cell centre of mass off, which this catches: every cell centre of mass must lie within its own
-/// Morton cell. Morton quantization makes point conservation automatic, which `Arena::new` asserts
+/// Morton cell. Morton quantization makes point conservation automatic, which `BarnesHutTree::new` asserts
 /// (the leaf masses sum to `n`), so the root mass equalling `n` confirms no point was lost or
 /// invented. The cloud is offset far from the origin so any centre of mass dragged toward it lands
 /// outside its cell. N is above the parallel code threshold.
@@ -1171,7 +1171,7 @@ fn arena_build_maintains_invariants() {
         *value += 100.0;
     }
 
-    let arena = barnes_hut_tree::Arena::<f32, u64, 2>::new(&data, N);
+    let arena = barnes_hut_tree::BarnesHutTree::<f32, u64, 2>::new_uniform(&data);
 
     assert_eq!(arena.root_count(), N, "arena lost or invented points");
 }
