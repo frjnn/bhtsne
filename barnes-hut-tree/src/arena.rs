@@ -8,10 +8,13 @@
 //! mass, mass, level), never raw coordinates. Morton quantization is total, so every point maps
 //! to exactly one cell, which the build asserts (leaf counts sum to `n`).
 
-use std::{array, ops::AddAssign};
+use core::{array, ops::AddAssign};
 
-use num_traits::Float;
+use alloc::vec::Vec;
 
+use num_traits::float::FloatCore;
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::{
@@ -21,6 +24,7 @@ use crate::{
 
 /// Minimum sample count before parallel rayon iterations use `with_min_len` to avoid
 /// overhead on small workloads.
+#[cfg(feature = "parallel")]
 const ARENA_MIN_CHUNK: usize = 4096;
 
 /// `first_child` value marking a leaf, a node with no children in the arena.
@@ -71,41 +75,45 @@ where
     level_half_width_sq: Vec<T>,
 }
 
-/// Per-axis bounding box of the embedding, reduced in parallel.
+/// Per-axis bounding box of the embedding.
 fn bounding_box<T, const D: usize>(y_chunks: &[[T; D]]) -> ([T; D], [T; D])
 where
-    T: Float + Send + Sync,
+    T: FloatCore + Send + Sync,
 {
-    y_chunks
-        .par_iter()
-        .with_min_len(ARENA_MIN_CHUNK)
-        .fold(
-            || ([T::max_value(); D], [-T::max_value(); D]),
-            |(mut min, mut max), point| {
-                for axis in 0..D {
-                    min[axis] = min[axis].min(point[axis]);
-                    max[axis] = max[axis].max(point[axis]);
-                }
+    let identity = || ([T::max_value(); D], [-T::max_value(); D]);
+    let widen = |(mut min, mut max): ([T; D], [T; D]), point: &[T; D]| {
+        for axis in 0..D {
+            min[axis] = min[axis].min(point[axis]);
+            max[axis] = max[axis].max(point[axis]);
+        }
 
-                (min, max)
-            },
-        )
-        .reduce(
-            || ([T::max_value(); D], [-T::max_value(); D]),
-            |(mut min_a, mut max_a), (min_b, max_b)| {
+        (min, max)
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        y_chunks
+            .par_iter()
+            .with_min_len(ARENA_MIN_CHUNK)
+            .fold(identity, widen)
+            .reduce(identity, |(mut min_a, mut max_a), (min_b, max_b)| {
                 for axis in 0..D {
                     min_a[axis] = min_a[axis].min(min_b[axis]);
                     max_a[axis] = max_a[axis].max(max_b[axis]);
                 }
 
                 (min_a, max_a)
-            },
-        )
+            })
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        y_chunks.iter().fold(identity(), widen)
+    }
 }
 
 impl<T, W, const D: usize> BarnesHutTree<T, W, D>
 where
-    T: Float + Send + Sync + AddAssign,
+    T: FloatCore + Send + Sync + AddAssign,
     W: MortonWord,
 {
     /// Creates an empty arena. The epoch loop holds one of these and rebuilds it each epoch so the
@@ -238,20 +246,29 @@ where
 
         // 2-4. Quantize, encode, and sort a (code, index) permutation into Z-order. `sorted` is
         // refilled from the cleared buffer, reusing its capacity across epochs.
-        self.sorted.par_extend(
-            (0..n_samples)
-                .into_par_iter()
-                .with_min_len(ARENA_MIN_CHUNK)
-                .map(|i| {
-                    let point = &y_chunks[i];
-                    let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
-                        point, &min, &inv_scale, max_bucket,
-                    ));
+        let encode_at = |i: usize| {
+            let point = &y_chunks[i];
+            let code = <Dim<D> as Morton<D>>::encode(quantize::<T, D>(
+                point, &min, &inv_scale, max_bucket,
+            ));
 
-                    (code, i as u32)
-                }),
-        );
-        self.sorted.par_sort_unstable_by_key(|&(code, _)| code);
+            (code, i as u32)
+        };
+        #[cfg(feature = "parallel")]
+        {
+            self.sorted.par_extend(
+                (0..n_samples)
+                    .into_par_iter()
+                    .with_min_len(ARENA_MIN_CHUNK)
+                    .map(&encode_at),
+            );
+            self.sorted.par_sort_unstable_by_key(|&(code, _)| code);
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.sorted.extend((0..n_samples).map(&encode_at));
+            self.sorted.sort_unstable_by_key(|&(code, _)| code);
+        }
 
         let sorted = &self.sorted;
         let nodes = &mut self.nodes;
@@ -321,34 +338,42 @@ where
             node += 1;
         }
 
-        // 6a. Leaf mass and mass-weighted center of mass, per leaf in parallel. Internal
-        // centers come from the bottom-up reduction below.
+        // 6a. Leaf mass and mass-weighted center of mass, per leaf. Each leaf writes only its
+        // own node. Internal centers come from the bottom-up reduction below.
         let mass_ref = &mass_of;
+        let aggregate_leaf = |(node, &(start, end)): (&mut Node<T, D>, &(u32, u32))| {
+            let mut center = [T::zero(); D];
+            let mut total = T::zero();
+            for slot in start..end {
+                let index = sorted[slot as usize].1 as usize;
+                let weight = mass_ref(index);
+                total += weight;
+                let point = &y_chunks[index];
+                center
+                    .iter_mut()
+                    .zip(point.iter())
+                    .for_each(|(ci, pi)| *ci += weight * *pi);
+            }
+            let inverse = total.recip();
+            center
+                .iter_mut()
+                .for_each(|value| *value = *value * inverse);
+            node.mass = total;
+            node.center_of_mass = center;
+        };
+        #[cfg(feature = "parallel")]
         nodes
             .par_iter_mut()
             .zip(ranges.par_iter())
             .with_min_len(ARENA_MIN_CHUNK)
             .filter(|(node, _)| node.first_child == SENTINEL)
-            .for_each(|(node, &(start, end))| {
-                let mut center = [T::zero(); D];
-                let mut total = T::zero();
-                for slot in start..end {
-                    let index = sorted[slot as usize].1 as usize;
-                    let weight = mass_ref(index);
-                    total += weight;
-                    let point = &y_chunks[index];
-                    center
-                        .iter_mut()
-                        .zip(point.iter())
-                        .for_each(|(ci, pi)| *ci += weight * *pi);
-                }
-                let inverse = total.recip();
-                center
-                    .iter_mut()
-                    .for_each(|value| *value = *value * inverse);
-                node.mass = total;
-                node.center_of_mass = center;
-            });
+            .for_each(aggregate_leaf);
+        #[cfg(not(feature = "parallel"))]
+        nodes
+            .iter_mut()
+            .zip(ranges.iter())
+            .filter(|(node, _)| node.first_child == SENTINEL)
+            .for_each(aggregate_leaf);
 
         // 6b. Internal mass and mass-weighted center of mass, bottom up. Children always sit
         // at a higher arena index than their parent.
@@ -522,9 +547,9 @@ where
         }
     }
 
-    /// Parallel driver over [`BarnesHutTree::accumulate_forces`]: force on every
-    /// `D`-component row of `queries` into the matching row of `out`. Each row runs on its
-    /// own rayon task with a stack-allocated traversal stack. `out` is overwritten per row.
+    /// Driver over [`BarnesHutTree::accumulate_forces`]: force on every `D`-component row of
+    /// `queries` into the matching row of `out`, overwritten per row. Rows run in parallel under
+    /// the `parallel` feature, otherwise in sequence reusing one traversal stack.
     ///
     /// # Panics
     ///
@@ -541,14 +566,25 @@ where
         );
         assert_eq!(queries.len(), out.len(), "out must match queries in length");
 
+        let compute_row = |stack: &mut [u32], (row, query): (&mut [T], &[T])| {
+            let mut force = [T::zero(); D];
+            self.accumulate_forces(query, theta, kernel, &mut force, stack);
+            row.copy_from_slice(&force);
+        };
+        #[cfg(feature = "parallel")]
         out.par_chunks_mut(D)
             .zip(queries.par_chunks(D))
             .with_min_len(ARENA_MIN_CHUNK)
-            .for_each_init(<Dim<D> as Morton<D>>::empty_stack, |stack, (row, query)| {
-                let mut force = [T::zero(); D];
-                self.accumulate_forces(query, theta, kernel, &mut force, stack.as_mut());
-                row.copy_from_slice(&force);
+            .for_each_init(<Dim<D> as Morton<D>>::empty_stack, |stack, item| {
+                compute_row(stack.as_mut(), item)
             });
+        #[cfg(not(feature = "parallel"))]
+        {
+            let mut stack = <Dim<D> as Morton<D>>::empty_stack();
+            out.chunks_mut(D)
+                .zip(queries.chunks(D))
+                .for_each(|item| compute_row(stack.as_mut(), item));
+        }
     }
 }
 
@@ -564,7 +600,7 @@ fn check_coms_within_cells<T, W, const D: usize>(
     bits: u32,
 ) -> bool
 where
-    T: Float,
+    T: FloatCore,
     W: MortonWord,
     Dim<D>: Morton<D, Word = W>,
 {
@@ -838,5 +874,106 @@ mod tests {
         // The force magnitude should be nonzero (points are well-separated).
         let mag = (forces[0] * forces[0] + forces[1] * forces[1] + forces[2] * forces[2]).sqrt();
         assert!(mag > 1e-6, "force magnitude should be nonzero");
+    }
+
+    /// Smooth, finite repulsion kernel: `mass / (1 + distance_squared)` on the displacement.
+    /// Linear in `mass`, so a collapsed multi-point leaf keeps the direct reference below exact.
+    fn repulse<const D: usize>(
+        displacement: &[f32; D],
+        distance_squared: f32,
+        mass: f32,
+        _is_leaf: bool,
+        force: &mut [f32; D],
+    ) {
+        let scale = mass / (1.0 + distance_squared);
+        for axis in 0..D {
+            force[axis] += scale * displacement[axis];
+        }
+    }
+
+    /// Direct O(n^2) force on every point from every other under [`repulse`], the exact value a
+    /// theta == 0 Barnes-Hut traversal must reproduce.
+    fn direct_forces<const D: usize>(y: &[f32], n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; n * D];
+        for i in 0..n {
+            let mut force = [0.0f32; D];
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let mut displacement = [0.0f32; D];
+                let mut distance_squared = 0.0f32;
+                for axis in 0..D {
+                    let delta = y[i * D + axis] - y[j * D + axis];
+                    displacement[axis] = delta;
+                    distance_squared += delta * delta;
+                }
+                if distance_squared <= 0.0 {
+                    continue;
+                }
+                repulse::<D>(&displacement, distance_squared, 1.0, true, &mut force);
+            }
+            out[i * D..i * D + D].copy_from_slice(&force);
+        }
+
+        out
+    }
+
+    /// At theta == 0 the traversal descends to every leaf, so `accumulate_all` reproduces the
+    /// direct sum. Runs in whichever build is active, holding the sequential fallback to the same
+    /// reference as the rayon path.
+    #[test]
+    fn accumulate_all_matches_direct_sum_at_theta_zero() {
+        const N: usize = 400;
+        const D: usize = 3;
+        let data = lcg_cloud(N, D, 71);
+        let tree = BarnesHutTree::<f32, u64, D>::new_uniform(&data);
+
+        let mut got = vec![0.0f32; N * D];
+        tree.accumulate_all(&data, 0.0, &repulse::<D>, &mut got);
+        let expected = direct_forces::<D>(&data, N);
+
+        for (component, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            // Only float reordering separates the two, far below a dropped-point error.
+            let tolerance = 1e-3 * e.abs().max(1.0);
+            assert!(
+                (g - e).abs() <= tolerance,
+                "theta=0 force diverged at component {component}: got {g}, expected {e}"
+            );
+        }
+    }
+
+    /// The driver must reproduce a plain per-row `accumulate_forces` loop bit for bit, since rows
+    /// are independent. Checked at an exact (theta == 0) and an approximating (theta == 0.5) case.
+    #[test]
+    fn accumulate_all_agrees_with_per_row_forces() {
+        const N: usize = 300;
+        const D: usize = 2;
+        let data = lcg_cloud(N, D, 13);
+        let tree = BarnesHutTree::<f32, u64, D>::new_uniform(&data);
+
+        for &theta in &[0.0f32, 0.5] {
+            let mut driver = vec![0.0f32; N * D];
+            tree.accumulate_all(&data, theta, &repulse::<D>, &mut driver);
+
+            let mut per_row = vec![0.0f32; N * D];
+            let mut stack = <Dim<D> as Morton<D>>::empty_stack();
+            for i in 0..N {
+                let mut force = [0.0f32; D];
+                tree.accumulate_forces(
+                    &data[i * D..],
+                    theta,
+                    &repulse::<D>,
+                    &mut force,
+                    stack.as_mut(),
+                );
+                per_row[i * D..i * D + D].copy_from_slice(&force);
+            }
+
+            assert_eq!(
+                driver, per_row,
+                "driver diverged from per-row traversal at theta {theta}"
+            );
+        }
     }
 }

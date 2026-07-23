@@ -1,6 +1,6 @@
 [package]
 name = "barnes-hut-tree"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Morton-code Barnes-Hut tree for spatial force approximation."
@@ -12,8 +12,14 @@ repository = "https://github.com/frjnn/bhtsne"
 unsafe_code = "forbid"
 
 [dependencies]
-num-traits = "0.2"
-rayon = "1"
+num-traits = { version = "0.2", default-features = false }
+rayon = { version = "1", optional = true }
+
+[features]
+default = ["std", "parallel"]
+std = ["num-traits/std"]
+# rayon needs threads, so parallel implies std.
+parallel = ["dep:rayon", "std"]
 
 [dev-dependencies]
 proptest = "1"

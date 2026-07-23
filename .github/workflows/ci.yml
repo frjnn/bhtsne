@@ -60,6 +60,23 @@ jobs:
       - name: Clippy on wasm32-unknown-unknown
         run: cargo clippy --target wasm32-unknown-unknown --features wasm_js -- -D warnings
 
+  no_std:
+    name: no_std and sequential barnes-hut-tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build barnes-hut-tree no_std + alloc on bare metal
+        run: cargo build -p barnes-hut-tree --no-default-features --target thumbv7em-none-eabi
+      - name: Clippy barnes-hut-tree no_std + alloc on bare metal
+        run: cargo clippy -p barnes-hut-tree --no-default-features --target thumbv7em-none-eabi -- -D warnings
+      - name: Test barnes-hut-tree sequential fallback
+        run: cargo test -p barnes-hut-tree --no-default-features --features std
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest

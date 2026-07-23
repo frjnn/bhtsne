@@ -3,13 +3,14 @@ use std::{
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
 
-use num_traits::{AsPrimitive, Float};
+use num_traits::{AsPrimitive, Float, float::FloatCore};
 
 use bhtsne::{FftNum, Neighbor};
 
 /// The scalar bound bundle the t-SNE solver requires, satisfied by both floats.
 pub trait Scalar:
     Float
+    + FloatCore
     + FftNum
     + Send
     + Sync
@@ -24,6 +25,7 @@ pub trait Scalar:
 
 impl<T> Scalar for T where
     T: Float
+        + FloatCore
         + FftNum
         + Send
         + Sync
@@ -58,7 +60,7 @@ pub fn lcg<T: Scalar>(n: usize, dim: usize, mut state: u64) -> Vec<T> {
 pub fn sq_euclidean<T: Scalar>(x: &[T], y: &[T]) -> T {
     x.iter()
         .zip(y)
-        .map(|(xi, yi)| (*xi - *yi).powi(2))
+        .map(|(xi, yi)| Float::powi(*xi - *yi, 2))
         .sum::<T>()
 }
 

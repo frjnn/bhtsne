@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+`no_std` + `alloc` support. `rayon` is now the optional, default-on `parallel` feature, with a sequential fallback when it is off (identical results up to floating-point summation order). The float bound is relaxed from `num_traits::Float` to `num_traits::float::FloatCore`, which the tree's arithmetic fits entirely, so dropping the default `std` feature builds the crate on bare metal with no math backend and `--no-default-features` alone compiles.
+
 ## 0.1.0
 
 Initial extraction from the `bhtsne` crate into a reusable Barnes-Hut primitive.

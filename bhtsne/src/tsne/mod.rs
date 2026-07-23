@@ -18,7 +18,7 @@ use rayon::{
 
 use rand_distr::{Distribution, Normal};
 
-use num_traits::{AsPrimitive, Float};
+use num_traits::{AsPrimitive, Float, float::FloatCore};
 
 use rustfft::FftNum;
 
@@ -647,7 +647,7 @@ pub(crate) fn evaluate_error_approximately<T, const D: usize>(
     theta: T,
 ) -> T
 where
-    T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
+    T: Float + FloatCore + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
     barnes_hut_tree::Dim<D>: barnes_hut_tree::Morton<D>,
 {
     // Get estimate of normalization term.
@@ -676,7 +676,14 @@ where
 
         q_sums.par_iter().map(|sum| *sum).sum::<T>()
     };
-    sparse_kl_divergence::<T, D>(p_rows, p_columns, p_values, y, n_samples, q_sum.recip())
+    sparse_kl_divergence::<T, D>(
+        p_rows,
+        p_columns,
+        p_values,
+        y,
+        n_samples,
+        Float::recip(q_sum),
+    )
 }
 
 /// Evaluate the t-SNE cost for an interpolation (FIt-SNE) fit.
