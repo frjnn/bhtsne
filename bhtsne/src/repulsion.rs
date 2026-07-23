@@ -11,7 +11,7 @@ use std::{
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
 
-use num_traits::{Float, cast::AsPrimitive};
+use num_traits::{Float, cast::AsPrimitive, float::FloatCore};
 
 use rustfft::FftNum;
 
@@ -73,7 +73,7 @@ where
 
 impl<T, W, const D: usize> BarnesHutRepulsion<T, W, D>
 where
-    T: Float + Send + Sync + AddAssign,
+    T: Float + FloatCore + Send + Sync + AddAssign,
     W: barnes_hut_tree::MortonWord,
 {
     pub(crate) fn new(theta: T) -> Self {
@@ -88,7 +88,7 @@ where
 
 impl<T, W, const D: usize> Repulsion<T, D> for BarnesHutRepulsion<T, W, D>
 where
-    T: Float + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
+    T: Float + FloatCore + Send + Sync + Sum + AddAssign + SubAssign + MulAssign + DivAssign,
     W: barnes_hut_tree::MortonWord,
     barnes_hut_tree::Dim<D>: barnes_hut_tree::Morton<D, Word = W>,
 {
@@ -154,7 +154,7 @@ where
         // the fused update multiply instead of dividing per value.
         let q_sum: T = self.q_sums.iter().copied().sum();
 
-        q_sum.recip()
+        Float::recip(q_sum)
     }
 
     fn error(

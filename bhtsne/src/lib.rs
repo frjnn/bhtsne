@@ -60,7 +60,7 @@ use std::{
     ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
 
-use num_traits::{Float, cast::AsPrimitive};
+use num_traits::{Float, cast::AsPrimitive, float::FloatCore};
 
 use repulsion::{BarnesHutRepulsion, InterpolatedRepulsion, Repulsion};
 
@@ -506,7 +506,7 @@ where
     /// [`barnes_hut`]: tSNE::barnes_hut
     pub fn kl_divergence(&self) -> Option<T>
     where
-        T: FftNum,
+        T: FftNum + FloatCore,
         Dim<D>: Morton<D>,
     {
         let n_samples = self.data.len();
@@ -765,6 +765,7 @@ where
     /// satisfy the [triangle inequality](https://en.wikipedia.org/wiki/Triangle_inequality).
     pub fn barnes_hut<F>(&mut self, theta: T, metric_f: F) -> &mut Self
     where
+        T: FloatCore,
         F: Fn(&U, &U) -> T + Send + Sync,
         Dim<D>: Morton<D>,
     {
@@ -825,6 +826,7 @@ where
         neighbors: &[Vec<Neighbor<T>>],
     ) -> &mut Self
     where
+        T: FloatCore,
         Dim<D>: Morton<D>,
     {
         // Reject a bad theta up front, on the cached path too, matching `barnes_hut`.

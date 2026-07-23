@@ -54,9 +54,14 @@ tree.compute_non_edge_forces(
 );
 ```
 
-## Parallelism
+## Parallelism and `no_std`
 
-Built on [rayon](https://github.com/rayon-rs/rayon), the arena build and force reductions run on whatever thread pool the caller runs in. See [rayon's FAQ](https://github.com/rayon-rs/rayon/blob/master/FAQ.md) for the physical versus logical cores discussion.
+The default `parallel` feature runs the arena build and force reductions on [rayon](https://github.com/rayon-rs/rayon). Turning it off swaps in a sequential fallback with the same results up to floating-point summation order. Dropping the default `std` feature makes the crate `no_std` + `alloc` for bare metal. The tree only needs `num_traits::float::FloatCore`, so no math backend is required:
+
+```toml
+[dependencies]
+barnes-hut-tree = { version = "0.1", default-features = false }
+```
 
 ## License
 

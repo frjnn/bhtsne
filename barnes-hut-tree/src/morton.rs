@@ -15,7 +15,7 @@ mod d5;
 mod d6;
 mod d7;
 
-use num_traits::Float;
+use num_traits::float::FloatCore;
 
 /// Integer type of a Morton code. Covers the operations the arena performs on codes: XOR, shifts,
 /// masks, comparison, and finding the most-significant differing bit.
@@ -25,9 +25,9 @@ pub trait MortonWord:
     + Copy
     + Default
     + Ord
-    + std::ops::BitXor<Output = Self>
-    + std::ops::BitAnd<Output = Self>
-    + std::ops::Shr<u32, Output = Self>
+    + core::ops::BitXor<Output = Self>
+    + core::ops::BitAnd<Output = Self>
+    + core::ops::Shr<u32, Output = Self>
 {
     /// Total number of bits in the type.
     const BITS: u32;
@@ -111,13 +111,13 @@ pub struct Dim<const D: usize>;
 /// `min` is the per-axis lower corner and `inv_scale[axis] = 2^B / extent[axis]` (or `0` for a
 /// degenerate zero-width axis, which collapses to bucket `0`). The result is clamped to
 /// `[0, 2^B - 1]`, so the maximum coordinate maps to the last bucket rather than overflowing.
-pub(crate) fn quantize<T: Float, const D: usize>(
+pub(crate) fn quantize<T: FloatCore, const D: usize>(
     point: &[T; D],
     min: &[T; D],
     inv_scale: &[T; D],
     max_bucket: u32,
 ) -> [u32; D] {
-    std::array::from_fn(|axis| {
+    core::array::from_fn(|axis| {
         let scaled = ((point[axis] - min[axis]) * inv_scale[axis]).floor();
 
         if scaled > T::zero() {
