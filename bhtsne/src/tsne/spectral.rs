@@ -69,12 +69,14 @@ macro_rules! spectral_block {
 
             #[inline]
             fn as_rows<T: Float + Default + Send + Sync>(flat: &[T]) -> &[[T; $width]] {
-                flat.as_chunks::<$width>().0
+                let (rows, _) = flat.as_chunks::<$width>();
+                rows
             }
 
             #[inline]
             fn as_rows_mut<T: Float + Default + Send + Sync>(flat: &mut [T]) -> &mut [[T; $width]] {
-                flat.as_chunks_mut::<$width>().0
+                let (rows, _) = flat.as_chunks_mut::<$width>();
+                rows
             }
         }
     )*};

@@ -665,7 +665,8 @@ mod tests {
     /// The mean of every point, the value the root center of mass must equal.
     fn mean<const D: usize>(y: &[f32], n: usize) -> [f32; D] {
         let mut sum = [0.0f32; D];
-        for point in y.chunks_exact(D) {
+        let (points, _) = y.as_chunks::<D>();
+        for point in points {
             for axis in 0..D {
                 sum[axis] += point[axis];
             }

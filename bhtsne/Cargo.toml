@@ -15,7 +15,7 @@ license = "MIT"
 name = "bhtsne"
 readme = "../README.md"
 repository = "https://github.com/frjnn/bhtsne"
-version = "0.7.12"
+version = "0.7.13"
 
 [features]
 default = ["csv"]
@@ -30,7 +30,7 @@ wasm_js = ["dep:getrandom", "rand/thread_rng"]
 unsafe_code = "forbid"
 
 [dependencies]
-barnes-hut-tree = { path = "../barnes-hut-tree", version = "=0.1.1" }
+barnes-hut-tree = { path = "../barnes-hut-tree", version = "=0.1.2" }
 csv = { version = "1", optional = true }
 num-traits = "0.2"
 rand_distr = "0.5"

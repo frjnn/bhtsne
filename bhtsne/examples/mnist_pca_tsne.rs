@@ -43,7 +43,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .expect("missing 'labels'")
         .into_vec()?;
     let n_samples = data.len() / PCA_DIMS;
-    let rows: Vec<&[f32]> = data.chunks_exact(PCA_DIMS).collect();
+    let (data_rows, _) = data.as_chunks::<PCA_DIMS>();
+    let rows: Vec<&[f32]> = data_rows.iter().map(|row| row.as_slice()).collect();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     println!("Loaded {n_samples} samples x {PCA_DIMS} PCA components");
@@ -96,7 +97,8 @@ fn plot_embedding(
     let root = BitMapBackend::new(path, (1200, 1280)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let (x_min, x_max, y_min, y_max) = embedding.chunks_exact(2).fold(
+    let (points, _) = embedding.as_chunks::<2>();
+    let (x_min, x_max, y_min, y_max) = points.iter().fold(
         (
             f64::INFINITY,
             f64::NEG_INFINITY,
@@ -117,8 +119,8 @@ fn plot_embedding(
         .build_cartesian_2d(x_range, y_range)?;
 
     for digit in 0..10u8 {
-        let points: Vec<(f64, f64)> = embedding
-            .chunks_exact(2)
+        let selected: Vec<(f64, f64)> = points
+            .iter()
             .zip(labels.iter())
             .filter_map(|(c, &l)| if l == digit { Some((c[0], c[1])) } else { None })
             .collect();
@@ -127,7 +129,7 @@ fn plot_embedding(
 
         chart
             .draw_series(PointSeries::of_element(
-                points,
+                selected,
                 1,
                 &color,
                 &|pt: (f64, f64), size, style| Circle::new(pt, size, style),

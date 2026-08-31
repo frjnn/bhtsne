@@ -1200,8 +1200,9 @@ fn barnes_hut_does_not_collapse_embedding() {
 
     // Count distinct positions, rounded to a hundredth. The collapse piled every point onto three
     // coordinates, a healthy embedding keeps them apart.
-    let distinct: HashSet<(i64, i64)> = embedding
-        .chunks_exact(2)
+    let (points, _) = embedding.as_chunks::<2>();
+    let distinct: HashSet<(i64, i64)> = points
+        .iter()
         .map(|point| {
             (
                 (point[0] * 100.0).round() as i64,
@@ -1801,8 +1802,9 @@ fn fit_sne_does_not_collapse_embedding() {
         embedding.iter().all(|v| v.is_finite()),
         "embedding contains non-finite values"
     );
-    let distinct: HashSet<(i64, i64)> = embedding
-        .chunks_exact(2)
+    let (points, _) = embedding.as_chunks::<2>();
+    let distinct: HashSet<(i64, i64)> = points
+        .iter()
         .map(|point| {
             (
                 (point[0] * 100.0).round() as i64,

@@ -65,8 +65,9 @@ pub(crate) struct Interpolant<T: FftNum, const D: usize> {
     potentials: Vec<T>,
     /// Per-point, per-axis box index, `n_samples * D`.
     box_index: Vec<usize>,
-    /// Per-point, per-axis Lagrange weights, `n_samples * D * INTERPOLATION_POINTS`.
-    weights: Vec<T>,
+    /// Per-point, per-axis Lagrange weights, `n_samples * D` rows of
+    /// `INTERPOLATION_POINTS`.
+    weights: Vec<[T; INTERPOLATION_POINTS]>,
 }
 
 impl<T, const D: usize> Interpolant<T, D>
@@ -153,7 +154,7 @@ where
         self.potentials.resize(n_samples * Self::TERMS, T::zero());
         self.box_index.resize(n_samples * D, 0);
         self.weights
-            .resize(n_samples * D * INTERPOLATION_POINTS, T::zero());
+            .resize(n_samples * D, [T::zero(); INTERPOLATION_POINTS]);
     }
 
     /// Assigns every point to a box per axis and computes its Lagrange
@@ -164,10 +165,11 @@ where
         let last_box = boxes_per_axis - 1;
         let basis = LagrangeBasis::<INTERPOLATION_POINTS, T>::new();
         let (box_index_chunks, _) = self.box_index.as_chunks_mut::<D>();
+        let (weight_chunks, _) = self.weights.as_chunks_mut::<D>();
         let (y_chunks, _) = y.as_chunks::<D>();
         box_index_chunks
             .par_iter_mut()
-            .zip(self.weights.par_chunks_mut(D * INTERPOLATION_POINTS))
+            .zip(weight_chunks.par_iter_mut())
             .zip(y_chunks.par_iter())
             .for_each(|((box_row, weight_row), point)| {
                 for axis in 0..D {
@@ -183,7 +185,7 @@ where
                     let local = (offset - T::from(box_id).unwrap())
                         .max(T::zero())
                         .min(T::one());
-                    basis.weights(local, &mut weight_row[axis * INTERPOLATION_POINTS..]);
+                    basis.weights(local, &mut weight_row[axis]);
                 }
             });
     }
@@ -256,11 +258,12 @@ where
         let real_grid = &mut self.real_grid;
         let (y_chunks, _) = y.as_chunks::<D>();
         let (box_chunks, _) = self.box_index.as_chunks::<D>();
+        let (weight_chunks, _) = self.weights.as_chunks::<D>();
         real_grid.iter_mut().for_each(|v| *v = T::zero());
         for ((point, box_row), weight_row) in y_chunks
             .iter()
             .zip(box_chunks.iter())
-            .zip(self.weights.chunks_exact(D * INTERPOLATION_POINTS))
+            .zip(weight_chunks.iter())
         {
             let charge = charge_value::<T, D>(point, term);
             for combo in 0..combinations {
@@ -286,12 +289,12 @@ where
         let combinations = INTERPOLATION_POINTS.pow(D as u32);
         let real_grid = &self.real_grid;
         let (box_chunks, _) = self.box_index.as_chunks::<D>();
-        let weights = &self.weights;
+        let (weight_chunks, _) = self.weights.as_chunks::<D>();
 
         self.potentials
             .par_chunks_mut(Self::TERMS)
             .zip(box_chunks.par_iter())
-            .zip(weights.par_chunks(D * INTERPOLATION_POINTS))
+            .zip(weight_chunks.par_iter())
             .for_each(|((point_terms, box_row), weight_row)| {
                 let mut phi = T::zero();
                 for combo in 0..combinations {
@@ -424,13 +427,10 @@ impl<const I: usize, T: Float> LagrangeBasis<I, T> {
     }
 
     /// Writes the Lagrange basis weights interpolating a value at `local in [0, 1]`
-    /// into the first `I` elements of `out`.
-    ///
-    /// `out` must have at least `I` elements; the first that many are
-    /// overwritten.
+    /// into `out`.
     #[inline]
-    fn weights(&self, local: T, out: &mut [T]) {
-        for (k, out_k) in out[..I].iter_mut().enumerate() {
+    fn weights(&self, local: T, out: &mut [T; I]) {
+        for (k, out_k) in out.iter_mut().enumerate() {
             let mut num = T::one();
             for (m, &node_m) in self.nodes.iter().enumerate() {
                 if m != k {
@@ -464,7 +464,7 @@ fn charge_value<T: Float + Sum, const D: usize>(point: &[T; D], term: usize) -> 
 fn node_of_combo<T: Float, const D: usize>(
     combo: usize,
     box_row: &[usize; D],
-    weight_row: &[T],
+    weight_row: &[[T; INTERPOLATION_POINTS]; D],
     fft_len: usize,
 ) -> (usize, T) {
     let p = INTERPOLATION_POINTS;
@@ -476,7 +476,7 @@ fn node_of_combo<T: Float, const D: usize>(
         rem /= p;
         let node = box_row[axis] * p + k;
         flat = flat * fft_len + node;
-        weight = weight * weight_row[axis * p + k];
+        weight = weight * weight_row[axis][k];
     }
 
     (flat, weight)

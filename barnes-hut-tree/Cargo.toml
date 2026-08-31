@@ -1,11 +1,17 @@
 [package]
 name = "barnes-hut-tree"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 description = "Morton-code Barnes-Hut tree for spatial force approximation."
 categories = ["algorithms", "science"]
-keywords = ["Barnes-Hut", "morton", "spatial", "quadtree", "force-approximation"]
+keywords = [
+    "Barnes-Hut",
+    "morton",
+    "spatial",
+    "quadtree",
+    "force-approximation",
+]
 repository = "https://github.com/frjnn/bhtsne"
 
 [lints.rust]

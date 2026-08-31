@@ -49,7 +49,8 @@ fn main() {
 
     for &n in SIZES {
         let data = blobs(n, SEED);
-        let rows: Vec<&[f32]> = data.chunks_exact(DIM).collect();
+        let (data_rows, _) = data.as_chunks::<DIM>();
+        let rows: Vec<&[f32]> = data_rows.iter().map(|row| row.as_slice()).collect();
 
         // Build the affinity graph once.
         let aff = {
